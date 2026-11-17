@@ -1,0 +1,20 @@
+[package]
+name = "tgcalls-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+rtc.workspace = true
+rusty-opus.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+webrtc.workspace = true
+
+[lints]
+workspace = true

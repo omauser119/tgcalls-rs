@@ -1,0 +1,37 @@
+[workspace]
+members = ["crates/tgcalls-core", "crates/tgcalls-sandbox", "crates/tgcalls-py"]
+resolver = "2"
+exclude = ["vendor/webrtc"]
+
+[patch.crates-io]
+webrtc = { path = "vendor/webrtc" }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.88"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+futures = "0.3"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1.52", features = ["rt-multi-thread", "net", "time", "sync", "io-util", "process", "macros"] }
+webrtc = "=0.21.1"
+rtc = "=0.21.1"
+rusty-opus = { git = "https://github.com/remade-with-rust/rusty-opus", rev = "782bd611d05b266c72338b74fd3631ae7afe563b" }
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+undocumented_unsafe_blocks = "deny"
+
+[profile.release]
+panic = "unwind"
+overflow-checks = true
+lto = "thin"

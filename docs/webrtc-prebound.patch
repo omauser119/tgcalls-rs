@@ -1,0 +1,112 @@
+--- a/src/peer_connection/mod.rs
++++ b/src/peer_connection/mod.rs
+@@ -183,6 +183,7 @@
+     runtime: Option<Arc<dyn Runtime>>,
+     handler: Option<Arc<dyn PeerConnectionEventHandler>>,
+     udp_addrs: Vec<A>,
++    prebound_udp_sockets: Vec<std::net::UdpSocket>,
+     tcp_addrs: Vec<A>,
+     dedicated_reactor_pool_size: usize,
+     data_channel_send_buffer_limit: usize,
+@@ -198,6 +199,7 @@
+             runtime: None,
+             handler: None,
+             udp_addrs: vec![],
++            prebound_udp_sockets: vec![],
+             tcp_addrs: vec![],
+             dedicated_reactor_pool_size: 0,
+             setting_engine: SettingEngine::default(),
+@@ -274,6 +276,13 @@
+     /// Port `0` picks an ephemeral port per socket, freshly on every rebind.
+     pub fn with_udp_addrs(mut self, udp_addrs: Vec<A>) -> Self {
+         self.udp_addrs = udp_addrs;
++        self
++    }
++
++    /// Use already-bound UDP sockets, for example descriptors brokered into a sandbox.
++    /// Do not also specify UDP addresses. Rebinding requires a newly brokered connection.
++    pub fn with_prebound_udp_sockets(mut self, sockets: Vec<std::net::UdpSocket>) -> Self {
++        self.prebound_udp_sockets = sockets;
+         self
+     }
+ 
+@@ -398,6 +407,7 @@
+             mdns_mode,
+             discard_local_candidates_during_ice_restart,
+             self.udp_addrs,
++            self.prebound_udp_sockets,
+             self.tcp_addrs,
+             self.dedicated_reactor_pool_size,
+             data_channel_send_buffer_limit,
+@@ -986,6 +996,7 @@
+         mdns_mode: MulticastDnsMode,
+         discard_local_candidates_during_ice_restart: bool,
+         udp_addrs: Vec<A>,
++        prebound_udp_sockets: Vec<std::net::UdpSocket>,
+         tcp_addrs: Vec<A>,
+         dedicated_reactor_pool_size: usize,
+         data_channel_send_buffer_limit: usize,
+@@ -1044,6 +1055,7 @@
+             let mut driver = PeerConnectionDriver::new(
+                 inner,
+                 udp_addrs,
++                prebound_udp_sockets,
+                 tcp_addrs,
+                 mdns_mode,
+                 ice_servers,
+--- a/src/peer_connection/driver.rs
++++ b/src/peer_connection/driver.rs
+@@ -530,6 +530,8 @@
+     /// re-resolves, and a wildcard re-enumerates the interfaces that exist at that moment rather
+     /// than the ones that existed when the connection was built.
+     udp_addrs: Vec<A>,
++    prebound_udp_sockets: Option<Vec<std::net::UdpSocket>>,
++    brokered: bool,
+     tcp_addrs: Vec<A>,
+     mdns_mode: MulticastDnsMode,
+     ice_servers: Vec<RTCIceServer>,
+@@ -555,6 +557,7 @@
+     pub(crate) fn new(
+         inner: Arc<PeerConnectionRef>,
+         udp_addrs: Vec<A>,
++        prebound_udp_sockets: Vec<std::net::UdpSocket>,
+         tcp_addrs: Vec<A>,
+         mdns_mode: MulticastDnsMode,
+         ice_servers: Vec<RTCIceServer>,
+@@ -564,6 +567,7 @@
+         turn_allocation_refresh_interval_cap: Option<Duration>,
+     ) -> Self {
+         let runtime = Arc::clone(&inner.runtime);
++        let brokered = !prebound_udp_sockets.is_empty();
+         Self {
+             inner,
+             // Placeholders until `bind_transports` runs; constructing them costs no I/O.
+@@ -591,6 +595,8 @@
+             pending_ice_configuration: None,
+             pending_data_channel_events: HashMap::new(),
+             udp_addrs,
++            prebound_udp_sockets: if brokered { Some(prebound_udp_sockets) } else { None },
++            brokered,
+             tcp_addrs,
+             mdns_mode,
+             ice_servers,
+@@ -643,6 +649,19 @@
+ 
+         if self.mdns_mode != MulticastDnsMode::Disabled {
+             self.mdns_socket = Some(runtime.wrap_udp_socket(MulticastSocket::new().into_std()?)?);
++        }
++
++        if self.brokered {
++            if !self.udp_addrs.is_empty() {
++                return Err(Error::Other("prebound UDP sockets cannot be combined with UDP addresses".into()));
++            }
++            let sockets = self.prebound_udp_sockets.take()
++                .ok_or_else(|| Error::Other("brokered transport requires a new connection to rebind".into()))?;
++            for socket in sockets {
++                socket.set_nonblocking(true)?;
++                let local_addr = socket.local_addr()?;
++                self.udp_sockets.insert(local_addr, runtime.wrap_udp_socket(socket)?);
++            }
+         }
+ 
+         // Resolve here, not at construction: this runs again on every ICE-restart rebind, which

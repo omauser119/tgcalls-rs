@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "tgcalls-rs"
+version = "0.1.0"
+requires-python = ">=3.11"
+description = "Rust Telegram group audio engine with an optional Linux process sandbox"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+
+[project.optional-dependencies]
+benchmark = ["psutil>=6,<8"]
+telegram = ["Telethon>=1.40,<2"]
+pytgcalls = ["py-tgcalls==3.0.1"]
+test = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2"]
+
+[tool.maturin]
+manifest-path = "crates/tgcalls-py/Cargo.toml"
+features = ["extension-module"]
+python-source = "python"
+module-name = "tgcalls_rs._native"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

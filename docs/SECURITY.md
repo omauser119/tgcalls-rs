@@ -3,6 +3,13 @@
 Проект экспериментальный; аудит и fuzzing зависимостей не завершены. Наличие
 Rust, catch_unwind и seccomp само по себе не доказывает безопасность.
 
+Ниже описан Linux/Python helper. Платформенные политики Android isolated UID,
+macOS XPC и iOS Wasm-интерпретатора описаны в [MOBILE.md](MOBILE.md). Для iOS
+граница проходит по линейной памяти и capability API внутри процесса: guest
+panic/abort, выход за память и исчерпание fuel перехватываются как traps. Хост,
+интерпретатор и C ABI остаются доверенными. Гарантии отдельного OS-процесса на
+iOS не заявляются. Нельзя включать JIT или переходить в native mode при ошибке.
+
 Обычный режим получает Result-based проверки размеров SDP/JSON/RTP/Opus,
 ограниченные очереди и catch_unwind на Python FFI и собственных codec tasks.
 Необработанная паника или abort в зависимости может оборвать in-process runtime;

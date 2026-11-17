@@ -7,6 +7,7 @@ pub enum Strategy {
     AndroidIsolatedService,
     MacosXpc,
     IosInterpreter,
+    Unsupported,
 }
 impl Strategy {
     pub const fn current() -> Self {
@@ -22,9 +23,18 @@ impl Strategy {
         {
             return Self::IosInterpreter;
         }
-        #[cfg(not(any(target_os = "android", target_os = "macos", target_os = "ios")))]
+        #[cfg(target_os = "linux")]
         {
             Self::LinuxSeccomp
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios"
+        )))]
+        {
+            Self::Unsupported
         }
     }
 }

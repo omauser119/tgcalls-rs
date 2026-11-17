@@ -43,7 +43,7 @@ public struct WorkerResponse: Decodable, Sendable {
     public let audio: [AudioFrame]
     public let video: [VideoFrame]
     public let signaling: [[UInt8]]
-    enum CodingKeys: CodingKey { case ok, error, datagrams, audio, video, signaling }
+    enum CodingKeys: String, CodingKey { case ok, error, datagrams, audio, video, signaling }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         ok = try c.decode(Bool.self, forKey: .ok); error = try c.decodeIfPresent(String.self, forKey: .error)

@@ -108,10 +108,19 @@ pub unsafe extern "C" fn tgcalls_client_request(
         if registry.outputs.len() >= 64 {
             return Err("release outstanding output tickets".into());
         }
-        let client = registry.clients.get_mut(&client).ok_or("unknown client")?;
-        let output = match client {
-            Client::Native(worker) => worker.execute(input),
-            Client::Hardened(worker) => worker.request(input).map_err(|e| e.to_string())?,
+        let current = registry.clients.get_mut(&client).ok_or("unknown client")?;
+        // Catch before the registry guard can unwind: a native codec panic must
+        // invalidate this client without poisoning every other call's registry.
+        let result = catch_unwind(AssertUnwindSafe(|| match current {
+            Client::Native(worker) => Ok(worker.execute(input)),
+            Client::Hardened(worker) => worker.request(input).map_err(|e| e.to_string()),
+        }));
+        let output = match result {
+            Ok(result) => result?,
+            Err(_) => {
+                registry.clients.remove(&client);
+                return Err("worker panic contained; create a fresh client".into());
+            }
         };
         let id = registry.id();
         registry.outputs.insert(id, output.into_boxed_slice());

@@ -36,10 +36,12 @@ impl VideoConfig {
             || !self.width.is_multiple_of(16)
             || !self.height.is_multiple_of(16)
             || !(1..=60).contains(&self.fps)
+            || u64::from(self.width / 16) * u64::from(self.height / 16) * u64::from(self.fps)
+                > 108_000
             || !(16_000..=10_000_000).contains(&self.bitrate)
         {
             return Err(Error::Invalid(
-                "video requires 16-aligned dimensions <=1280x720, 1..60 fps, bounded bitrate"
+                "video requires 16-aligned dimensions <=1280x720, 1..60 fps within H264 level 3.1, bounded bitrate"
                     .into(),
             ));
         }
@@ -72,6 +74,7 @@ impl VideoEncoder {
         options.framerate = config.fps as f32;
         options.bitrate = config.bitrate;
         options.gop_size = config.fps;
+        options.level_idc = 31;
         let encoder = Encoder::new(options).map_err(|e| Error::Codec(e.to_string()))?;
         Ok(Self { encoder, config })
     }

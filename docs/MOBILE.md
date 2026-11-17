@@ -80,7 +80,8 @@ optional `datagrams`, `audio`, `video`, `signaling` arrays. **Consume media and
 datagrams from every response**, including negotiation and tick responses.
 
 1. Bind UDP in the app; `new(local, ssrc, video?)` creates the worker. Video is
-   bounded Baseline H.264, I420, multiples of 16, up to 1280x720, 1–60 fps.
+   bounded Baseline H.264 level 3.1, I420, multiples of 16, up to 1280x720,
+   1–60 fps subject to 108,000 macroblocks/sec (720p is at most 30 fps).
 2. Generic WebRTC tests use `offer`, `answer(sdp)`, `accept_answer(sdp)`.
 3. Personal Telegram calls use `init_dh(g, prime, random, commitment?)` and
    `complete_dh(remote, fingerprint?)`. The caller first sends its commitment;

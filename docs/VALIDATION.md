@@ -6,7 +6,7 @@
 
 * `cargo fmt --all -- --check`
 * `cargo clippy --locked --workspace --all-targets -- -D warnings`
-* `cargo test --locked --workspace`: функциональные тесты Linux audio/SFU,
+* `cargo test --locked --workspace`: 25 функциональных тестов Linux audio/SFU,
   personal signaling/DH, аудио/видео, mobile request API и containment
 * `scripts/build-wasm.sh` и `tgcalls-isolation --features worker-tests`: настоящий
   ICE/DTLS/SRTP + RustyOpus/H.264 внутри Wasmi без JIT; trap/fuel/memory/import tests
@@ -33,6 +33,9 @@ advisories для версий зависимостей, не независим
 kernel netem scenarios, длительный fuzzing и release performance qualification.
 Apple/Android cross-builds и Swift smoke tests описаны в workflow CI; локальная
 Linux-проверка интерпретатора не является тестом iPhone/Android-устройства.
+GitHub Actions для `f88da7b`: Linux Python 3.11/3.14 и Android NDK/Java build
+успешны ([run](https://github.com/omauser119/tgcalls-rs/actions/runs/44113859398));
+Apple job на момент записи ожидает runner и пока не подтверждает Apple build.
 Для live-проверки нужны явно указанные пользовательская сессия и тестовый чат.
 Полный паритет с оригинальным TgCalls не подтверждён; unsupported matrix
 зафиксирован в [COMPATIBILITY.md](COMPATIBILITY.md).

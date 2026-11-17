@@ -68,6 +68,16 @@ fn black() -> Vec<u8> {
 
 #[test]
 fn remade_h264_roundtrip_and_rtp_fragmentation() -> Result<(), Box<dyn std::error::Error>> {
+    assert!(
+        VideoConfig {
+            width: 1280,
+            height: 720,
+            fps: 60,
+            bitrate: 1_000_000
+        }
+        .validate()
+        .is_err()
+    );
     let mut encoder = VideoEncoder::new(video_config())?;
     let au = encoder.encode(&black())?;
     assert!(!au.is_empty());

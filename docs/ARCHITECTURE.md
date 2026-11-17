@@ -1,5 +1,13 @@
 # Архитектура
 
+Схема ниже — существующий Linux/Python аудиотракт. Новый `sansio::Engine`
+использует тот же `rtc` protocol core без собственного сетевого рантайма.
+`worker::Worker` объединяет DH, защищённый личный сигналинг и Opus/H.264 с
+ограниченным request API. C ABI в `tgcalls-ffi` используется Swift/Android SDK.
+На iOS тот же Worker компилируется в WASI reactor и исполняется Wasmi без JIT;
+на Android его размещает isolated Service, на macOS — sandboxed XPC Service.
+Подробные границы, сборки и текущие ограничения: [MOBILE.md](MOBILE.md).
+
 ```
 Приложение / PyTGCalls / Telethon (MTProto, авторизация)
   └── asyncio.to_thread → PyO3 Engine

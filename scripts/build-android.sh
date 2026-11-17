@@ -7,6 +7,7 @@ if [[ "$(uname -s)" = Darwin ]]; then task_host=darwin-x86_64; fi
 task_cc="$task_ndk/toolchains/llvm/prebuilt/$task_host/bin/aarch64-linux-android28-clang"
 test -x "$task_cc"
 export CC_aarch64_linux_android="$task_cc"
+export AR_aarch64_linux_android="$task_ndk/toolchains/llvm/prebuilt/$task_host/bin/llvm-ar"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$task_cc"
 rustup target add aarch64-linux-android
 cd "$task_root"

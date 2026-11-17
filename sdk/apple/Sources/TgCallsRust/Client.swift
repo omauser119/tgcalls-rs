@@ -4,7 +4,7 @@ import Foundation
 /// datagram to its destination and every incoming encrypted datagram to packet.
 /// Call tick every 10 ms while a call is active. Restart negotiation after errors.
 public actor TgCallsClient {
-    public enum Isolation: Sendable { case standard, hardened }
+    public enum Isolation: Sendable, Equatable { case standard, hardened }
     private let local: LocalWorker?
     #if os(macOS)
     private let xpc: XpcWorker?

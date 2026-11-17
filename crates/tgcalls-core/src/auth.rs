@@ -3,7 +3,7 @@
 use crate::{Error, Result};
 use crypto_bigint::{
     Encoding, U2048,
-    modular::{MontyForm, MontyParams},
+    modular::{FixedMontyForm, FixedMontyParams},
 };
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
@@ -47,11 +47,11 @@ pub struct KeyExchange {
     consumed: bool,
 }
 
-fn params() -> Result<MontyParams<{ U2048::LIMBS }>> {
+fn params() -> Result<FixedMontyParams<{ U2048::LIMBS }>> {
     let prime = U2048::from_be_hex(TELEGRAM_PRIME_HEX);
     let odd = Option::from(prime.to_odd())
         .ok_or_else(|| Error::Invalid("invalid pinned DH prime".into()))?;
-    Ok(MontyParams::new_vartime(odd)) // modulus is public, never the secret exponent
+    Ok(FixedMontyParams::new_vartime(odd)) // modulus is public, never the secret exponent
 }
 
 fn check_public(value: &U2048) -> Result<()> {
@@ -70,7 +70,10 @@ impl KeyExchange {
         server_random: &[u8],
         commitment: Option<&[u8]>,
     ) -> Result<Self> {
-        if prime != U2048::from_be_hex(TELEGRAM_PRIME_HEX).to_be_bytes()
+        if prime
+            != U2048::from_be_hex(TELEGRAM_PRIME_HEX)
+                .to_be_bytes()
+                .as_ref()
             || g != 3
             || server_random.len() != 256
         {
@@ -92,14 +95,14 @@ impl KeyExchange {
             for (a, b) in bytes.iter_mut().zip(server_random) {
                 *a ^= *b;
             }
-            let exponent = Zeroizing::new(U2048::from_be_bytes(*bytes));
-            let public = MontyForm::new(&U2048::from_u32(g), params)
+            let exponent = Zeroizing::new(U2048::from_be_bytes((*bytes).into()));
+            let public = FixedMontyForm::new(&U2048::from_u32(g), &params)
                 .pow(&exponent)
                 .retrieve();
             if check_public(&public).is_ok() {
                 return Ok(Self {
                     exponent,
-                    public: public.to_be_bytes(),
+                    public: public.to_be_bytes().into(),
                     commitment,
                     consumed: false,
                 });
@@ -143,13 +146,14 @@ impl KeyExchange {
                 ));
             }
         }
-        let value = U2048::from_be_bytes(remote);
+        let value = U2048::from_be_bytes(remote.into());
         check_public(&value)?;
         let key = AuthKey(Zeroizing::new(
-            MontyForm::new(&value, params()?)
+            FixedMontyForm::new(&value, &params()?)
                 .pow(&self.exponent)
                 .retrieve()
-                .to_be_bytes(),
+                .to_be_bytes()
+                .into(),
         ));
         if let Some(expected) = expected_fingerprint
             && !bool::from(

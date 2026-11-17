@@ -19,9 +19,38 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
+      - name: Build and test iOS interpreter worker
+        if: matrix.python == '3.11'
+        run: |
+          rustup target add wasm32-wasip1
+          bash scripts/build-wasm.sh
+          TGCALLS_WORKER_WASM="$PWD/artifacts/tgcalls-worker.wasm" cargo test --locked -p tgcalls-isolation --features worker-tests --test wasm_engine
       - run: |
           python -m venv .venv
           . .venv/bin/activate
           pip install maturin pytest pytest-asyncio 'py-tgcalls==3.0.1' 'Telethon>=1.40,<2'
           maturin develop --locked
           TGCALLS_SANDBOX_BIN="$PWD/target/debug/tgcalls-sandbox" pytest -q
+  apple:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
+        with:
+          targets: wasm32-wasip1
+      - run: bash scripts/build-wasm.sh
+      - run: cargo build --locked --release -p tgcalls-ffi
+      - run: swift test --package-path sdk/apple -Xlinker "-L$PWD/target/release"
+      - run: bash scripts/build-apple.sh
+      - run: bash scripts/package-macos-worker.sh org.tgcalls.test.worker
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
+      - name: Build Android native worker and Java SDK
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-35' 'ndk;27.2.12479018'
+          ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018" bash scripts/build-android.sh
+          mkdir -p sdk/android/build/classes
+          javac --release 17 -classpath "$ANDROID_HOME/platforms/android-35/android.jar" -d sdk/android/build/classes sdk/android/src/main/java/org/tgcalls/rust/*.java

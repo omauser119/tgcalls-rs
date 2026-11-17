@@ -1,0 +1,5 @@
+module CTgCalls [system] {
+    header "tgcalls.h"
+    link "tgcalls_ffi"
+    export *
+}

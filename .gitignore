@@ -6,3 +6,11 @@ __pycache__/
 *.session*
 /results/
 /.env
+/artifacts/
+/crates/tgcalls-wasm/target/
+/sdk/android/build/
+/sdk/android/.gradle/
+/sdk/android/src/main/jniLibs/
+/sdk/apple/.build/
+/sdk/apple/.swiftpm/
+/sdk/apple/Tests/TgCallsRustTests/Resources/*.wasm

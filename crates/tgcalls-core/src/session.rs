@@ -1,3 +1,4 @@
+use crate::video::{H264_FMTP, H264Assembler, VideoConfig, VideoDecoder, VideoEncoder, VideoFrame};
 use crate::{
     AudioFrame, Error, Impairment, Result, SessionStats, codec, jitter::JitterBuffer,
     packet::validate_sdp, telegram,
@@ -24,6 +25,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc, watch};
+use webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample;
 use webrtc::media_stream::track_local::{TrackLocal, static_rtp::TrackLocalStaticRTP};
 use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 use webrtc::peer_connection::{
@@ -40,6 +42,8 @@ struct Counters {
     concealed: AtomicU64,
     dropped: AtomicU64,
     active_tracks: AtomicU64,
+    sent_video: AtomicU64,
+    received_video: AtomicU64,
 }
 
 struct TrackBudget(Arc<Counters>);
@@ -56,6 +60,8 @@ struct Handler {
     echo: Option<Arc<TrackLocalStaticRTP>>,
     counters: Arc<Counters>,
     impairment: Impairment,
+    video_frames: mpsc::Sender<Result<VideoFrame>>,
+    echo_video: Option<Arc<TrackLocalStaticSample>>,
 }
 
 #[async_trait]
@@ -69,14 +75,8 @@ impl PeerConnectionEventHandler for Handler {
         }
     }
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
-        if self
-            .counters
-            .active_tracks
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                if n < 64 { Some(n + 1) } else { None }
-            })
-            .is_err()
-        {
+        if self.counters.active_tracks.fetch_add(1, Ordering::AcqRel) >= 64 {
+            self.counters.active_tracks.fetch_sub(1, Ordering::AcqRel);
             self.counters.dropped.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -85,10 +85,33 @@ impl PeerConnectionEventHandler for Handler {
         let counters = self.counters.clone();
         let echo = self.echo.clone();
         let impairment = self.impairment.clone();
+        let is_video = track.kind().await == RtpCodecKind::Video;
+        let video_frames = self.video_frames.clone();
+        let echo_video = self.echo_video.clone();
         // Handler must return immediately: the connection driver delivers media itself.
         tokio::spawn(async move {
             let _budget = budget;
             use futures::FutureExt;
+            if is_video {
+                let result = std::panic::AssertUnwindSafe(receive_video_track(
+                    track,
+                    echo_video,
+                    video_frames.clone(),
+                    counters,
+                ))
+                .catch_unwind()
+                .await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        let _ = video_frames.try_send(Err(e));
+                    }
+                    Err(_) => {
+                        let _ = video_frames.try_send(Err(Error::Panic));
+                    }
+                }
+                return;
+            }
             let result = std::panic::AssertUnwindSafe(receive_track(
                 track,
                 echo,
@@ -109,6 +132,66 @@ impl PeerConnectionEventHandler for Handler {
             }
         });
     }
+}
+
+async fn receive_video_track(
+    track: Arc<dyn TrackRemote>,
+    echo: Option<Arc<TrackLocalStaticSample>>,
+    frames: mpsc::Sender<Result<VideoFrame>>,
+    counters: Arc<Counters>,
+) -> Result<()> {
+    use webrtc::media_stream::Track;
+    let mut assembler = H264Assembler::default();
+    let mut decoder = VideoDecoder::default();
+    let mut last_pli = Instant::now() - Duration::from_secs(2);
+    while let Some(event) = track.poll().await {
+        let TrackRemoteEvent::OnRtpPacket(mut packet) = event else {
+            continue;
+        };
+        if let Some(output) = &echo {
+            packet.header.ssrc = *output
+                .ssrcs()
+                .await
+                .first()
+                .ok_or_else(|| Error::Invalid("missing video echo SSRC".into()))?;
+            output.write_rtp(packet).await?;
+            continue;
+        }
+        let result = assembler
+            .push(
+                packet.header.sequence_number,
+                packet.header.timestamp,
+                packet.header.marker,
+                &packet.payload,
+                Instant::now(),
+            )
+            .and_then(|au| {
+                au.map(|au| decoder.decode(packet.header.ssrc, packet.header.timestamp, &au))
+                    .transpose()
+                    .map(Option::flatten)
+            });
+        match result {
+            Ok(Some(frame)) => {
+                counters.received_video.fetch_add(1, Ordering::Relaxed);
+                if frames.try_send(Ok(frame)).is_err() {
+                    counters.dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => {
+                counters.dropped.fetch_add(1, Ordering::Relaxed);
+                assembler = H264Assembler::default();
+                decoder = VideoDecoder::default();
+                if last_pli.elapsed() >= Duration::from_secs(1) {
+                    last_pli = Instant::now();
+                    let _=track.write_rtcp(vec![Box::new(rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication {
+                        sender_ssrc:0,media_ssrc:packet.header.ssrc,
+                    })]).await;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn receive_track(
@@ -193,9 +276,11 @@ struct Peer {
     state: watch::Receiver<RTCPeerConnectionState>,
     gathered: watch::Receiver<bool>,
     ssrc: u32,
+    video_output: Option<Arc<TrackLocalStaticSample>>,
 }
 
 impl Peer {
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         bind_ip: &str,
         socket: Option<std::net::UdpSocket>,
@@ -204,6 +289,10 @@ impl Peer {
         echo: bool,
         impairment: Impairment,
         ssrc: u32,
+        video: Option<VideoConfig>,
+        video_frames: mpsc::Sender<Result<VideoFrame>>,
+        one_way: bool,
+        ice_servers: Vec<webrtc::peer_connection::RTCIceServer>,
     ) -> Result<Self> {
         let codec = RTCRtpCodec {
             mime_type: MIME_TYPE_OPUS.into(),
@@ -227,6 +316,26 @@ impl Peer {
             RtpCodecKind::Audio,
             None,
         )?;
+        let video_codec = RTCRtpCodec {
+            mime_type: "video/H264".into(),
+            clock_rate: 90_000,
+            channels: 0,
+            sdp_fmtp_line: H264_FMTP.into(),
+            rtcp_feedback: vec![rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+                typ: "nack".into(),
+                parameter: "pli".into(),
+            }],
+        };
+        if let Some(config) = &video {
+            config.validate()?;
+            media.register_codec(
+                RTCRtpCodecParameters {
+                    rtp_codec: video_codec.clone(),
+                    payload_type: 100,
+                },
+                RtpCodecKind::Video,
+            )?;
+        }
         let registry = register_default_interceptors(Registry::new(), &mut media)?;
         let output = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
             "tgcalls-rs".into(),
@@ -244,6 +353,29 @@ impl Peer {
         )));
         let (state_tx, state) = watch::channel(RTCPeerConnectionState::New);
         let (gather_tx, gathered) = watch::channel(false);
+        let video_output = video
+            .as_ref()
+            .map(|_| {
+                TrackLocalStaticSample::new(
+                    Instant::now(),
+                    MediaStreamTrack::new(
+                        "tgcalls-rs".into(),
+                        format!("video-{}", ssrc.wrapping_add(1)),
+                        "camera".into(),
+                        RtpCodecKind::Video,
+                        vec![RTCRtpEncodingParameters {
+                            rtp_coding_parameters: RTCRtpCodingParameters {
+                                ssrc: Some(ssrc.wrapping_add(1)),
+                                ..Default::default()
+                            },
+                            codec: video_codec,
+                            ..Default::default()
+                        }],
+                    ),
+                )
+            })
+            .transpose()?
+            .map(Arc::new);
         let handler = Arc::new(Handler {
             state: state_tx,
             gathered: gather_tx,
@@ -251,9 +383,16 @@ impl Peer {
             echo: if echo { Some(output.clone()) } else { None },
             counters,
             impairment,
+            video_frames,
+            echo_video: if echo { video_output.clone() } else { None },
         });
         let mut builder = PeerConnectionBuilder::new()
             .with_media_engine(media)
+            .with_configuration(
+                webrtc::peer_connection::RTCConfigurationBuilder::default()
+                    .with_ice_servers(ice_servers)
+                    .build(),
+            )
             .with_interceptor_registry(registry)
             .with_handler(handler)
             .with_data_channel_send_buffer_limit(64 * 1024)
@@ -274,13 +413,39 @@ impl Peer {
                 .with_prebound_udp_sockets(vec![socket]);
         }
         let pc: Arc<dyn PeerConnection> = Arc::new(builder.build().await?);
-        pc.add_track(output.clone()).await?;
+        if one_way {
+            pc.add_transceiver_from_track(
+                output.clone(),
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Sendonly,
+                    ..Default::default()
+                }),
+            )
+            .await?;
+        } else {
+            pc.add_track(output.clone()).await?;
+        }
+        if let Some(track) = &video_output {
+            if one_way {
+                pc.add_transceiver_from_track(
+                    track.clone(),
+                    Some(RTCRtpTransceiverInit {
+                        direction: RTCRtpTransceiverDirection::Sendonly,
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+            } else {
+                pc.add_track(track.clone()).await?;
+            }
+        }
         Ok(Self {
             pc,
             output,
             state,
             gathered,
             ssrc,
+            video_output,
         })
     }
 
@@ -334,16 +499,64 @@ pub struct Session {
     incoming: Mutex<mpsc::Receiver<Result<AudioFrame>>>,
     counters: Arc<Counters>,
     telegram: Mutex<Option<(String, String, Vec<u32>)>>,
+    video_encoder: Mutex<Option<VideoEncoder>>,
+    video_incoming: Mutex<mpsc::Receiver<Result<VideoFrame>>>,
 }
 
 impl Session {
+    pub(crate) async fn personal_media(
+        bind_ip: &str,
+        sockets: Option<Vec<std::net::UdpSocket>>,
+        ssrc: u32,
+        video: Option<VideoConfig>,
+        servers: Vec<webrtc::peer_connection::RTCIceServer>,
+    ) -> Result<Self> {
+        let (tx, rx) = mpsc::channel(128);
+        let (vtx, vrx) = mpsc::channel(4);
+        let counters = Arc::new(Counters::default());
+        let primary = Peer::new(
+            bind_ip,
+            sockets.and_then(|s| s.into_iter().next()),
+            tx,
+            counters.clone(),
+            false,
+            Impairment::default(),
+            ssrc,
+            video.clone(),
+            vtx,
+            true,
+            servers,
+        )
+        .await?;
+        Ok(Self {
+            primary,
+            echo: None,
+            encoder: Mutex::new(codec::Encoder::new()?),
+            send_state: Mutex::new((0, 0)),
+            incoming: Mutex::new(rx),
+            counters,
+            telegram: Mutex::new(None),
+            video_encoder: Mutex::new(video.map(VideoEncoder::new).transpose()?),
+            video_incoming: Mutex::new(vrx),
+        })
+    }
     pub async fn loopback(
         impairment: Impairment,
         bind_ip: &str,
         sockets: Option<Vec<std::net::UdpSocket>>,
     ) -> Result<Self> {
+        Self::loopback_video(impairment, bind_ip, sockets, None).await
+    }
+
+    pub async fn loopback_video(
+        impairment: Impairment,
+        bind_ip: &str,
+        sockets: Option<Vec<std::net::UdpSocket>>,
+        video: Option<VideoConfig>,
+    ) -> Result<Self> {
         impairment.validate()?;
         let (tx, rx) = mpsc::channel(128);
+        let (vtx, vrx) = mpsc::channel(4);
         let counters = Arc::new(Counters::default());
         let mut sockets = sockets.unwrap_or_default().into_iter();
         let primary = Peer::new(
@@ -354,6 +567,10 @@ impl Session {
             false,
             Impairment::default(),
             1001,
+            video.clone(),
+            vtx.clone(),
+            false,
+            vec![],
         )
         .await?;
         let echo = Peer::new(
@@ -364,6 +581,10 @@ impl Session {
             true,
             impairment,
             1002,
+            video.clone(),
+            vtx,
+            false,
+            vec![],
         )
         .await?;
         let result = async {
@@ -395,6 +616,8 @@ impl Session {
             incoming: Mutex::new(rx),
             counters,
             telegram: Mutex::new(None),
+            video_encoder: Mutex::new(video.map(VideoEncoder::new).transpose()?),
+            video_incoming: Mutex::new(vrx),
         })
     }
 
@@ -403,10 +626,20 @@ impl Session {
         sockets: Option<Vec<std::net::UdpSocket>>,
         ssrc: u32,
     ) -> Result<Self> {
+        Self::group_video(bind_ip, sockets, ssrc, None).await
+    }
+
+    pub async fn group_video(
+        bind_ip: &str,
+        sockets: Option<Vec<std::net::UdpSocket>>,
+        ssrc: u32,
+        video: Option<VideoConfig>,
+    ) -> Result<Self> {
         if ssrc == 0 {
             return Err(Error::Invalid("SSRC must be nonzero".into()));
         }
         let (tx, rx) = mpsc::channel(128);
+        let (vtx, vrx) = mpsc::channel(4);
         let counters = Arc::new(Counters::default());
         let primary = Peer::new(
             bind_ip,
@@ -416,6 +649,10 @@ impl Session {
             false,
             Impairment::default(),
             ssrc,
+            video.clone(),
+            vtx,
+            true,
+            vec![],
         )
         .await?;
         primary.pc.create_data_channel("data", None).await?;
@@ -428,6 +665,8 @@ impl Session {
             incoming: Mutex::new(rx),
             counters,
             telegram: Mutex::new(Some((offer, String::new(), vec![]))),
+            video_encoder: Mutex::new(video.map(VideoEncoder::new).transpose()?),
+            video_incoming: Mutex::new(vrx),
         })
     }
 
@@ -560,6 +799,54 @@ impl Session {
         Ok(timestamp)
     }
 
+    pub async fn send_video(&self, i420: &[u8]) -> Result<()> {
+        let mut encoder = self.video_encoder.lock().await;
+        let encoder = encoder
+            .as_mut()
+            .ok_or_else(|| Error::Invalid("video is not enabled".into()))?;
+        let duration = Duration::from_secs_f64(1.0 / f64::from(encoder.config().fps));
+        let data = encoder.encode(i420)?;
+        self.primary
+            .video_output
+            .as_ref()
+            .ok_or_else(|| Error::Invalid("video track missing".into()))?
+            .write_sample(
+                self.primary.ssrc.wrapping_add(1),
+                100,
+                &rtc::media::Sample {
+                    data: Bytes::from(data),
+                    duration,
+                    timestamp: Instant::now(),
+                    packet_timestamp: 0,
+                    prev_dropped_packets: 0,
+                    prev_padding_packets: 0,
+                },
+                &[],
+            )
+            .await?;
+        self.counters.sent_video.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+    pub async fn receive_video(&self, timeout: Duration) -> Result<VideoFrame> {
+        tokio::time::timeout(timeout, self.video_incoming.lock().await.recv())
+            .await
+            .map_err(|_| Error::Timeout)?
+            .ok_or(Error::Closed)?
+    }
+
+    pub(crate) fn rtc(&self) -> Arc<dyn PeerConnection> {
+        self.primary.pc.clone()
+    }
+    pub(crate) async fn refresh_offer(&self) -> Result<String> {
+        self.primary.local_sdp(true).await
+    }
+    pub async fn wait_connected(&self) -> Result<()> {
+        self.primary.wait_connected().await
+    }
+    pub fn audio_ssrc(&self) -> u32 {
+        self.primary.ssrc
+    }
+
     pub async fn receive(&self, timeout: Duration) -> Result<AudioFrame> {
         tokio::time::timeout(timeout, self.incoming.lock().await.recv())
             .await
@@ -574,6 +861,8 @@ impl Session {
             concealed_frames: self.counters.concealed.load(Ordering::Relaxed),
             dropped_frames: self.counters.dropped.load(Ordering::Relaxed),
             connection_state: format!("{:?}", *self.primary.state.borrow()),
+            sent_video_frames: self.counters.sent_video.load(Ordering::Relaxed),
+            received_video_frames: self.counters.received_video.load(Ordering::Relaxed),
         }
     }
 

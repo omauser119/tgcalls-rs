@@ -24,8 +24,17 @@ API имена и типы сверяются с установленными Py
 PyTGCalls использует private `_binding`; обновление версии требует повторной
 проверки адаптера. Отсутствующие методы не подменяются успешными заглушками.
 
-Нет поддержки Telegram personal calls (DH auth_key и encrypted signaling),
-video/simulcast, conference E2EE, MTProto broadcast transport, device/file/shell
-media sources. DTLS/SRTP группового звонка не следует называть Telegram E2EE.
+Rust core теперь реализует личные звонки: проверенный DH exchange, Telegram V2
+encrypted signaling (8.0.0/9.0.0), однонаправленные медиаканалы в обе стороны,
+Opus и Baseline H.264 на Remade-With-Rust. Есть локальные тесты полного обмена
+ключами/сигналингом и двустороннего медиатракта. Core API и mobile request API
+пока не подключены к личным звонкам/видео в старом Python NTgCalls-адаптере.
+Live-совместимость с официальными Telegram-клиентами не подтверждена; текущий
+mobile transport без STUN gathering/TURN требует достижимых host candidates.
+V3 signaling (версии 12/13), Telegram reflector/MTProto media, групповое видео,
+simulcast, conference E2EE, broadcast transport и device/file/shell media sources
+не реализованы. DTLS/SRTP группового звонка не следует называть Telegram E2EE.
 Поэтому полный функциональный и качественный паритет с оригинальным TgCalls
 на текущем этапе **не достигнут**.
+
+Apple/Android сборки и точные границы Harden Mode: [MOBILE.md](MOBILE.md).

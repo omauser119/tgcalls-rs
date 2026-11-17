@@ -5,16 +5,32 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-async-trait.workspace = true
+async-trait = { workspace = true, optional = true }
 bytes.workspace = true
-futures.workspace = true
+futures = { workspace = true, optional = true }
 rtc.workspace = true
 rusty-opus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
-webrtc.workspace = true
+tokio = { workspace = true, optional = true }
+webrtc = { workspace = true, optional = true }
+aes = "0.8"
+ctr = "0.9"
+crypto-bigint = { version = "0.6.1", features = ["zeroize"] }
+getrandom = "0.3"
+sha1 = "0.10"
+sha2 = "0.10"
+subtle = "2"
+zeroize = { version = "1", features = ["derive"] }
+rusty_h264 = { git = "https://github.com/Remade-With-Rust/rusty_h264", rev = "67bd819fbc618f926fa529bc7dacd3caaba5a13a", default-features = false, features = ["std", "asm"] }
+
+[features]
+default = ["async"]
+async = ["dep:async-trait", "dep:futures", "dep:tokio", "dep:webrtc"]
+
+[dev-dependencies]
+env_logger = "0.11"
 
 [lints]
 workspace = true

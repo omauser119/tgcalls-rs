@@ -1,8 +1,11 @@
 # tgcalls-rs
 
-Экспериментальный Rust-движок группового аудио Telegram: **webrtc-rs + Tokio +
+Экспериментальный Rust-движок Telegram: **webrtc-rs + Tokio +
 [rusty-opus](https://github.com/remade-with-rust/rusty-opus)**, PyO3 и отдельный
-Linux worker с seccomp. Системный libopus не используется.
+Linux worker с seccomp. Личные звонки и видео реализованы в Rust core; кодеки —
+**RustyOpus и [Remade-With-Rust/rusty_h264](https://github.com/Remade-With-Rust/rusty_h264)**.
+Системные libopus, libx264 и FFmpeg не используются. Для Apple/Android добавлен
+host-driven клиент и платформенные границы изоляции: [MOBILE.md](docs/MOBILE.md).
 
 Это начальная реализация, **не полный и не сертифицированный по безопасности
 заменитель оригинального TgCalls**. Есть Telegram DataJSON/SDP bridge и примеры
@@ -17,7 +20,10 @@ Linux worker с seccomp. Системный libopus не используетс�
 | PyTGCalls 3.0.1: групповой `ExternalMedia.AUDIO` backend | Адаптер; не полный NTgCalls API |
 | Отдельный worker, SCM_RIGHTS, sealed memfd, seccomp, watchdog | Реализовано для Linux |
 | Автоматизированные RTT/CPU/RSS/loss/jitter сценарии | Harness подготовлен; бенчмарки не запускались |
-| Личные P2P-звонки, видео, демонстрация экрана, RTMP/MTProto broadcasts | Не реализованы |
+| Личные звонки: DH, V2 encrypted signaling, двусторонние Opus/H.264 | Core и mobile request API, локальные тесты; live Telegram не проверен |
+| iOS Harden Mode | Wasm-интерпретатор без JIT, лимиты памяти/fuel, сброс после trap; функциональный медиатест |
+| macOS / Android Harden Mode | Swift XPC / Java isolated Service + SharedMemory; сборки в CI, проверка на устройствах требуется |
+| Групповое видео, simulcast, RTMP/MTProto broadcasts | Не реализованы |
 | AEC/NS/AGC, микрофон/динамик, resampling | Не реализованы; приложение подаёт готовый PCM |
 
 ## Сборка

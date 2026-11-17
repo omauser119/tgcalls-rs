@@ -1,11 +1,20 @@
 //! Bounded audio engine. Telegram authentication remains with the caller's MTProto client.
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod codec;
 pub mod jitter;
+pub mod negotiation;
 pub mod packet;
+#[cfg(feature = "async")]
+pub mod personal;
+pub mod sansio;
+#[cfg(feature = "async")]
 pub mod session;
+pub mod signaling;
 pub mod telegram;
+pub mod video;
+pub mod worker;
 
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +29,7 @@ pub enum Error {
     #[error("invalid input: {0}")]
     Invalid(String),
     #[error("WebRTC: {0}")]
-    WebRtc(#[from] webrtc::error::Error),
+    WebRtc(#[from] rtc::shared::error::Error),
     #[error("codec: {0}")]
     Codec(String),
     #[error("operation timed out")]
@@ -69,4 +78,6 @@ pub struct SessionStats {
     pub concealed_frames: u64,
     pub dropped_frames: u64,
     pub connection_state: String,
+    pub sent_video_frames: u64,
+    pub received_video_frames: u64,
 }

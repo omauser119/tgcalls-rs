@@ -1,10 +1,11 @@
 [workspace]
-members = ["crates/tgcalls-core", "crates/tgcalls-sandbox", "crates/tgcalls-py"]
+members = ["crates/tgcalls-core", "crates/tgcalls-sandbox", "crates/tgcalls-py", "crates/tgcalls-isolation", "crates/tgcalls-ffi"]
 resolver = "2"
-exclude = ["vendor/webrtc"]
+exclude = ["vendor/webrtc", "vendor/rtc-mdns", "crates/tgcalls-wasm"]
 
 [patch.crates-io]
 webrtc = { path = "vendor/webrtc" }
+rtc-mdns = { path = "vendor/rtc-mdns" }
 
 [workspace.package]
 version = "0.1.0"
@@ -35,3 +36,14 @@ undocumented_unsafe_blocks = "deny"
 panic = "unwind"
 overflow-checks = true
 lto = "thin"
+
+# The interpreter executes cryptographic protocol timers during functional tests.
+# Compile it with optimization in debug builds as well; no JIT is enabled.
+[profile.dev.package.wasmi]
+opt-level = 3
+[profile.dev.package.wasmi_core]
+opt-level = 3
+[profile.dev.package.wasmi_ir]
+opt-level = 3
+[profile.dev.package.wasmi_collections]
+opt-level = 3

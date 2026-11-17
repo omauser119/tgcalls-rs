@@ -13,14 +13,14 @@ pub struct Fingerprint {
     pub fingerprint: String,
 }
 
-fn token(value: &str, min: usize, max: usize) -> Result<&str> {
+pub(crate) fn token(value: &str, min: usize, max: usize) -> Result<&str> {
     if !(min..=max).contains(&value.len()) || !value.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(Error::Invalid("invalid signaling token".into()));
     }
     Ok(value)
 }
 
-fn fingerprint(fp: &Fingerprint) -> Result<()> {
+pub(crate) fn fingerprint(fp: &Fingerprint) -> Result<()> {
     let pairs: Vec<_> = fp.fingerprint.split(':').collect();
     if fp.hash != "sha-256"
         || pairs.len() != 32

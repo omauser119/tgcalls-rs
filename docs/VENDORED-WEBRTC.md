@@ -25,3 +25,18 @@ exercise real ICE/DTLS/SRTP through this transport path.
 When upgrading upstream, reapply/review this patch, regenerate the diff, check
 the syscall policy, and rerun the SFU/audio/crash tests. Vendoring does not imply
 that upstream or this patch has received an independent security audit.
+
+## rtc-mdns WASI build gate
+
+`vendor/rtc-mdns` is crates.io `rtc-mdns` 0.21.1. Its licenses/provenance metadata
+are retained. The only local change makes `socket2`, the multicast socket module
+and its re-export conditional on `not(target_family = "wasm")`. The Sans-I/O
+mDNS parser/querier remain present; the worker disables mDNS. WASI has no socket
+capability, so an unused platform socket helper must not enter the module graph.
+Native targets keep the upstream socket implementation.
+
+Video is pinned to Remade-With-Rust/rusty_h264 revision
+`67bd819fbc618f926fa529bc7dacd3caaba5a13a` (0.17.2), with std and portable Rust
+SIMD paths. No Remade FFmpeg wrapper or system codec is required for PCM/I420
+external frames. Container/file decoding is not currently exposed; integrating
+it later must use the requested Remade-With-Rust implementations.

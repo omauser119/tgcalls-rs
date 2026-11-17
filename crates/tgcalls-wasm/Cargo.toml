@@ -1,0 +1,24 @@
+[package]
+name = "tgcalls-wasm"
+version = "0.2.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tgcalls-core = { path = "../tgcalls-core", default-features = false }
+serde_json = "1"
+
+[workspace]
+
+[patch.crates-io]
+webrtc = { path = "../../vendor/webrtc" }
+rtc-mdns = { path = "../../vendor/rtc-mdns" }
+
+[profile.release]
+panic = "abort"
+overflow-checks = true
+lto = "thin"
+strip = "debuginfo"

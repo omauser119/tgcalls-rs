@@ -1,3 +1,4 @@
 # Preserve upstream formatting and unified-diff context lines verbatim.
 vendor/webrtc/** -whitespace
+vendor/rtc-mdns/** -whitespace
 docs/*.patch -whitespace

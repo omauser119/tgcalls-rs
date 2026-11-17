@@ -1,0 +1,8 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application>
+        <service android:name="org.tgcalls.rust.IsolatedWorkerService"
+            android:exported="false" android:isolatedProcess="true"
+            android:process=":tgcalls_isolated" />
+    </application>
+</manifest>

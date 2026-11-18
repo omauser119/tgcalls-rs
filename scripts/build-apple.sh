@@ -10,8 +10,14 @@ fi
 export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-15.0}"
 audio_sources="$task_root/sdk/apple/Sources/TgCallsIOSAudio"
 mkdir -p artifacts/apple/{device,headers,simulator}
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-for target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+targets=(aarch64-apple-ios)
+case "${1:-}" in
+    '') targets+=(aarch64-apple-ios-sim x86_64-apple-ios) ;;
+    --device-only) ;;
+    *) echo 'Usage: build-apple.sh [--device-only]' >&2; exit 2 ;;
+esac
+rustup target add "${targets[@]}"
+for target in "${targets[@]}"; do
     sdk=iphonesimulator
     environment=-simulator
     arch=arm64
@@ -40,13 +46,14 @@ module CTgCalls {
 }
 EOF
 cp artifacts/apple/aarch64-apple-ios.a artifacts/apple/device/libtgcalls_ffi.a
-xcrun lipo -create artifacts/apple/aarch64-apple-ios-sim.a artifacts/apple/x86_64-apple-ios.a \
-    -output artifacts/apple/simulator/libtgcalls_ffi.a
+libraries=(-library artifacts/apple/device/libtgcalls_ffi.a -headers artifacts/apple/headers)
+if [[ "${#targets[@]}" -gt 1 ]]; then
+    xcrun lipo -create artifacts/apple/aarch64-apple-ios-sim.a artifacts/apple/x86_64-apple-ios.a \
+        -output artifacts/apple/simulator/libtgcalls_ffi.a
+    libraries+=(-library artifacts/apple/simulator/libtgcalls_ffi.a -headers artifacts/apple/headers)
+fi
 rm -rf artifacts/apple/TgCallsRust.xcframework
-xcodebuild -create-xcframework \
-    -library artifacts/apple/device/libtgcalls_ffi.a -headers artifacts/apple/headers \
-    -library artifacts/apple/simulator/libtgcalls_ffi.a -headers artifacts/apple/headers \
-    -output artifacts/apple/TgCallsRust.xcframework
+xcodebuild -create-xcframework "${libraries[@]}" -output artifacts/apple/TgCallsRust.xcframework
 mkdir -p artifacts/apple/TgCallsRust.xcframework/Resources
 cp artifacts/tgcalls-worker.wasm artifacts/apple/TgCallsRust.xcframework/Resources/
 cp artifacts/tgcalls-worker.wasm artifacts/apple/

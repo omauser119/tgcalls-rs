@@ -85,7 +85,11 @@ async fn worker_transmits_audio_and_recovers_from_sigkill() -> anyhow::Result<()
     let waiting = tokio::spawn(async move { reader.receive(Duration::from_secs(30)).await });
     tokio::time::sleep(Duration::from_millis(20)).await;
     sandbox.close().await;
-    assert!(tokio::time::timeout(Duration::from_secs(1), waiting).await??.is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await??
+            .is_err()
+    );
     Ok(())
 }
 

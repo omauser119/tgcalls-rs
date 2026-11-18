@@ -47,15 +47,17 @@ pub extern "C" fn tg_request(pointer: u32, length: u32) -> u64 {
     let Ok(mut runtime) = runtime().lock() else {
         return 0;
     };
-    let Some(input) = runtime
-        .allocations
+    let Runtime {
+        worker,
+        allocations,
+    } = &mut *runtime;
+    let Some(input) = allocations
         .get(&pointer)
         .and_then(|v| v.get(..length as usize))
-        .map(<[u8]>::to_vec)
     else {
         return 0;
     };
-    let output = runtime.worker.execute(&input);
+    let output = worker.execute(input);
     if output.len() > 32 * 1024 * 1024 {
         return 0;
     }

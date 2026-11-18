@@ -112,7 +112,6 @@ pub fn answer_sdp(offer: &str, response: &str, remote_ssrcs: &[u32]) -> Result<S
     remote_sdp(offer, response, remote_ssrcs, false)
 }
 
-#[cfg(feature = "async")]
 pub(crate) fn sfu_offer_sdp(
     template: &str,
     response: &str,

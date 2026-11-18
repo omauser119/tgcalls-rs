@@ -134,6 +134,7 @@ static BOOL SupportsCaptureRate(uint32_t rate) {
         return;
     }
     if (active) {
+        _interrupted = NO;
         [self resumeGraph];
     } else {
         [self stopGraph];
@@ -169,8 +170,8 @@ static BOOL SupportsCaptureRate(uint32_t rate) {
         return;
     }
     if ([event.name isEqualToString:AVAudioSessionInterruptionNotification]) {
-        _interrupted = [event.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue] == AVAudioSessionInterruptionTypeBegan;
-        if (_interrupted) {
+        if ([event.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue] == AVAudioSessionInterruptionTypeBegan) {
+            _interrupted = YES;
             [self stopGraph];
             _activated = NO;
             return;
@@ -178,6 +179,7 @@ static BOOL SupportsCaptureRate(uint32_t rate) {
         if (([event.userInfo[AVAudioSessionInterruptionOptionKey] unsignedIntegerValue] & AVAudioSessionInterruptionOptionShouldResume) == 0) {
             return;
         }
+        _interrupted = NO;
     } else {
         if ([event.name isEqualToString:AVAudioSessionMediaServicesWereResetNotification]) {
             _activated = NO;

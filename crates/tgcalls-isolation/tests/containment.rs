@@ -92,3 +92,27 @@ fn wasi_context_has_no_preopened_app_directory() -> Result<(), Box<dyn std::erro
     assert_eq!(sandbox.request(b"{}")?, b"{}");
     Ok(())
 }
+
+#[test]
+fn entropy_rejects_invalid_ranges_and_enforces_the_request_budget()
+-> Result<(), Box<dyn std::error::Error>> {
+    let bytes = wat::parse_str(
+        r#"(module
+        (import "wasi_snapshot_preview1" "random_get" (func $random (param i32 i32) (result i32)))
+        (memory (export "memory") 2)
+        (data (i32.const 2048) "{}")
+        (func (export "tg_alloc") (param i32) (result i32) i32.const 1024)
+        (func (export "tg_free") (param i32))
+        (func (export "tg_request") (param i32 i32) (result i64)
+            i32.const -32 i32.const 64 call $random i32.const 21 i32.ne if unreachable end
+            i32.const 4096 i32.const 65536 call $random if unreachable end
+            i32.const 4096 i32.const 1 call $random i32.const 76 i32.ne if unreachable end
+            i64.const 8796093022210))"#,
+    )?;
+    let mut sandbox = WasmSandbox::new(&bytes, Limits::default())?;
+    for _ in 0..2 {
+        assert_eq!(sandbox.request(b"{}")?, b"{}");
+        assert_eq!(sandbox.generation(), 0);
+    }
+    Ok(())
+}

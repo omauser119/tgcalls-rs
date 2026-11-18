@@ -16,6 +16,9 @@ use std::{
 };
 
 pub const MAX_REQUEST: usize = 8 * 1024 * 1024;
+/// Raw host-supplied buffers. The final header byte selects verified key (1),
+/// rendered PCM (2), captured PCM prefixed with a little-endian u16 delay (3).
+pub const BUFFER_MAGIC: &[u8] = b"TGC\x01";
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -27,6 +30,8 @@ pub enum Request {
         ice_servers: Vec<IceServer>,
         #[serde(default)]
         relay_only: bool,
+        #[serde(default)]
+        group: bool,
     },
     Offer,
     Answer {
@@ -88,6 +93,9 @@ pub enum Request {
     GroupConnect {
         params: String,
     },
+    GroupSources {
+        ssrcs: Vec<u32>,
+    },
 }
 #[derive(Serialize, Deserialize)]
 pub struct Response {
@@ -140,6 +148,9 @@ pub struct Worker {
     key: Option<AuthKey>,
     personal: Option<Personal>,
     offer: Option<String>,
+    group: bool,
+    group_transport: Option<String>,
+    group_sources: Vec<u32>,
     ssrc: u32,
     voice: Option<VoiceProcessor>,
     captured: Option<Vec<u8>>,
@@ -148,6 +159,8 @@ impl Worker {
     pub fn execute(&mut self, bytes: &[u8]) -> Vec<u8> {
         let result = if bytes.len() > MAX_REQUEST {
             Err(Error::Invalid("request budget exceeded".into()))
+        } else if let Some(bytes) = bytes.strip_prefix(BUFFER_MAGIC) {
+            self.handle_buffer(bytes)
         } else {
             serde_json::from_slice::<Request>(bytes)
                 .map_err(|e| Error::Invalid(e.to_string()))
@@ -165,6 +178,46 @@ impl Worker {
             br#"{"ok":false,"error":"response serialization failed","payload":null}"#.to_vec()
         })
     }
+    fn handle_buffer(&mut self, request: &[u8]) -> Result<Response> {
+        let mut response = Response::success();
+        match request {
+            [1, key @ ..]
+                if !self.group
+                    && self.key.is_none()
+                    && self.personal.is_none()
+                    && self.exchange.is_none()
+                    && self.engine.is_some() =>
+            {
+                self.key = Some(AuthKey::from_bytes(key)?);
+            }
+            [2, pcm @ ..] => self
+                .voice
+                .as_mut()
+                .ok_or_else(no_audio_device)?
+                .render(pcm)?,
+            [3, low, high, pcm @ ..] => {
+                response.payload =
+                    self.capture(pcm, u16::from_le_bytes([*low, *high]), Instant::now())?;
+            }
+            _ => return Err(Error::Invalid("invalid host buffer or call state".into())),
+        }
+        self.collect(response)
+    }
+
+    fn capture(&mut self, pcm: &[u8], delay: u16, now: Instant) -> Result<Value> {
+        let block = self
+            .voice
+            .as_mut()
+            .ok_or_else(no_audio_device)?
+            .capture(pcm, delay)?;
+        if let Some(mut frame) = self.captured.take() {
+            frame.extend(block);
+            Ok(json!(self.engine()?.send_audio(&frame, now)?))
+        } else {
+            self.captured = Some(block);
+            Ok(Value::Null)
+        }
+    }
     fn engine(&mut self) -> Result<&mut Engine> {
         self.engine
             .as_mut()
@@ -180,20 +233,23 @@ impl Worker {
                 video,
                 ice_servers,
                 relay_only,
+                group,
             } => {
                 if self.engine.is_some() || ssrc == 0 {
                     return Err(Error::Invalid("already initialized or invalid SSRC".into()));
                 }
-                self.engine = Some(Engine::with_ice(
-                    local
-                        .parse()
-                        .map_err(|_| Error::Invalid("local address".into()))?,
-                    ssrc,
-                    video,
-                    ice_servers,
-                    relay_only,
-                    now,
-                )?);
+                let local = local
+                    .parse()
+                    .map_err(|_| Error::Invalid("local address".into()))?;
+                self.engine = Some(if group {
+                    if video.is_some() || relay_only || !ice_servers.is_empty() {
+                        return Err(Error::Invalid("unsupported group transport options".into()));
+                    }
+                    Engine::group(local, ssrc, now)?
+                } else {
+                    Engine::with_ice(local, ssrc, video, ice_servers, relay_only, now)?
+                });
+                self.group = group;
                 self.ssrc = ssrc;
             }
             Request::Offer => {
@@ -240,17 +296,7 @@ impl Worker {
                 .ok_or_else(no_audio_device)?
                 .render(&pcm)?,
             Request::CaptureAudio { pcm, delay_ms } => {
-                let block = self
-                    .voice
-                    .as_mut()
-                    .ok_or_else(no_audio_device)?
-                    .capture(&pcm, delay_ms)?;
-                if let Some(mut frame) = self.captured.take() {
-                    frame.extend(block);
-                    response.payload = json!(self.engine()?.send_audio(&frame, now)?);
-                } else {
-                    self.captured = Some(block);
-                }
+                response.payload = self.capture(&pcm, delay_ms, now)?;
             }
             Request::SendVideo { i420 } => self.engine()?.send_video(&i420, now)?,
             Request::Drain => {}
@@ -359,8 +405,10 @@ impl Worker {
                 response.payload = json!({"media_negotiated":state.exchange.is_none() && !state.accepted.is_empty() && !state.remote.is_empty()});
             }
             Request::GroupPayload => {
-                self.engine()?.one_way()?;
-                let offer = self.engine()?.offer()?;
+                if !self.group {
+                    return Err(Error::Invalid("initialize a group worker first".into()));
+                }
+                let offer = self.engine()?.offer_template()?;
                 response.payload = json!(crate::telegram::join_payload(&offer, self.ssrc)?);
                 self.offer = Some(offer);
             }
@@ -368,11 +416,49 @@ impl Worker {
                 let offer = self
                     .offer
                     .as_ref()
+                    .filter(|_| self.group)
                     .ok_or_else(|| Error::Invalid("generate group payload first".into()))?;
-                let answer = crate::telegram::answer_sdp(offer, &params, &[])?;
-                self.engine()?.accept_answer(answer)?;
+                let sdp = crate::telegram::sfu_offer_sdp(offer, &params, &self.group_sources)?;
+                response.payload = json!(self.engine()?.answer(sdp)?);
+                self.group_transport = Some(params);
+            }
+            Request::GroupSources { ssrcs } => {
+                let params = self
+                    .group_transport
+                    .as_ref()
+                    .ok_or_else(|| {
+                        Error::Invalid("connect to the SFU before adding sources".into())
+                    })?
+                    .clone();
+                if ssrcs.len() > 64 || ssrcs.contains(&0) || ssrcs.contains(&self.ssrc) {
+                    return Err(Error::Invalid("invalid remote group sources".into()));
+                }
+                let added: BTreeSet<_> = ssrcs
+                    .into_iter()
+                    .filter(|ssrc| !self.group_sources.contains(ssrc))
+                    .collect();
+                if self.group_sources.len() + added.len() > 64 {
+                    return Err(Error::Invalid(
+                        "group source budget exhausted; rejoin required".into(),
+                    ));
+                }
+                if !added.is_empty() {
+                    for ssrc in added {
+                        self.engine()?.add_receiver(false)?;
+                        self.group_sources.push(ssrc);
+                    }
+                    let template = self.engine()?.offer_template()?;
+                    let sdp =
+                        crate::telegram::sfu_offer_sdp(&template, &params, &self.group_sources)?;
+                    self.engine()?.answer(sdp)?;
+                    self.offer = Some(template);
+                }
             }
         }
+        self.collect(response)
+    }
+
+    fn collect(&mut self, mut response: Response) -> Result<Response> {
         if let Some(engine) = &mut self.engine {
             response.datagrams = engine.outgoing()?;
             response.audio = engine.audio.drain(..).collect();

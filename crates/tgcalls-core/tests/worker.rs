@@ -4,7 +4,12 @@ use std::{
     collections::VecDeque,
     time::{Duration, Instant},
 };
-use tgcalls_core::{auth::TELEGRAM_PRIME_HEX, worker::Worker};
+use tgcalls_core::{
+    PCM_BYTES,
+    auth::TELEGRAM_PRIME_HEX,
+    sansio::Engine,
+    worker::{BUFFER_MAGIC, Worker},
+};
 
 fn execute(worker: &mut Worker, request: Value) -> Result<Value, Box<dyn std::error::Error>> {
     let response: Value = serde_json::from_slice(&worker.execute(&serde_json::to_vec(&request)?))?;
@@ -125,5 +130,128 @@ fn mobile_worker_keeps_dh_keys_internal_and_negotiates_personal_audio_video()
     }
     assert!(audio > 0, "missing decoded audio");
     assert!(video > 0, "missing decoded video");
+    Ok(())
+}
+
+#[test]
+fn worker_group_answers_controlling_sfu_and_sends_audio() -> Result<(), Box<dyn std::error::Error>>
+{
+    let local = "127.0.0.1:42001".parse()?;
+    let remote = "127.0.0.1:42002".parse()?;
+    let mut client = Worker::default();
+    execute(
+        &mut client,
+        json!({"op":"new", "group":true, "local":local, "ssrc":101}),
+    )?;
+    let join = execute(&mut client, json!({"op":"group_payload"}))?;
+    let join: Value =
+        serde_json::from_str(join["payload"].as_str().ok_or("missing join payload")?)?;
+    assert_eq!(join["ssrc"], 101);
+    let mut sfu = Engine::new(remote, 202, None, Instant::now())?;
+    sfu.personal_channel()?;
+    let offer = sfu.offer()?;
+    let attribute = |prefix| {
+        offer
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .ok_or("missing SDP attribute")
+    };
+    let (hash, fp) = attribute("a=fingerprint:")?
+        .split_once(' ')
+        .ok_or("invalid fingerprint")?;
+    let candidates: Vec<_> = offer.lines().filter_map(|line| line.strip_prefix("a=candidate:"))
+        .map(|c| {
+            let fields: Vec<_> = c.split_whitespace().collect();
+            if fields.len() < 8 { return Err("invalid candidate"); }
+            Ok(json!({"foundation":fields[0], "component":fields[1], "protocol":fields[2], "priority":fields[3], "ip":fields[4], "port":fields[5], "type":fields[7]}))
+        }).collect::<Result<_, _>>()?;
+    let params = json!({"transport":{
+        "ufrag":attribute("a=ice-ufrag:")?, "pwd":attribute("a=ice-pwd:")?,
+        "fingerprints":[{"hash":hash, "setup":"active", "fingerprint":fp}], "candidates":candidates,
+    }})
+    .to_string();
+    let result = execute(&mut client, json!({"op":"group_connect", "params":params}))?;
+    let answer = result["payload"].as_str().ok_or("missing group answer")?;
+    assert!(answer.contains("a=setup:passive"));
+    sfu.accept_answer(answer.into())?;
+    let now = Instant::now();
+    let mut sent = false;
+    while now.elapsed() < Duration::from_secs(5) {
+        sfu.tick(Instant::now())?;
+        let tick = execute(&mut client, json!({"op":"tick"}))?;
+        let mut responses = vec![tick];
+        for packet in sfu.outgoing()? {
+            responses.push(execute(
+                &mut client,
+                json!({"op":"packet", "peer":remote, "bytes":packet.bytes}),
+            )?);
+        }
+        if !sent && responses[0]["payload"]["connection_state"] == "connected" {
+            execute(&mut client, json!({"op":"group_sources", "ssrcs":[202]}))?;
+            responses.push(execute(
+                &mut client,
+                json!({"op":"send_audio", "pcm":vec![0; PCM_BYTES]}),
+            )?);
+            sent = true;
+        }
+        for response in responses {
+            for packet in response["datagrams"].as_array().into_iter().flatten() {
+                let bytes: Vec<u8> = serde_json::from_value(packet["bytes"].clone())?;
+                sfu.receive_datagram(local, &bytes, Instant::now())?;
+            }
+        }
+        if let Some(frame) = sfu.audio.pop_front() {
+            assert_eq!(frame.ssrc, 101);
+            assert_eq!(frame.pcm.len(), PCM_BYTES);
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Err(format!(
+        "no group SRTP audio; state={}, sent={sent}",
+        sfu.connection_state
+    )
+    .into())
+}
+
+#[test]
+fn host_buffer_requires_exact_verified_key_and_pcm_sizes() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut client = Worker::default();
+    execute(
+        &mut client,
+        json!({"op":"new", "local":"127.0.0.1:42003", "ssrc":303}),
+    )?;
+    let mut key = [BUFFER_MAGIC, &[1], &[7; 255]].concat();
+    let request = |worker: &mut Worker, body: &[u8]| -> Result<bool, serde_json::Error> {
+        Ok(serde_json::from_slice::<Value>(&worker.execute(body))?["ok"] == true)
+    };
+    assert!(!request(&mut client, &key)?);
+    key.push(7);
+    assert!(request(&mut client, &key)?);
+    assert!(!request(&mut client, &key)?);
+    execute(&mut client, json!({"op":"start_personal", "outgoing":true}))?;
+    execute(
+        &mut client,
+        json!({"op":"configure_audio", "capture_rate":48000, "capture_channels":1,
+        "render_rate":48000, "render_channels":2,
+        "options":{"echo_cancellation":true, "noise_suppression":true, "automatic_gain":true}}),
+    )?;
+    assert!(request(
+        &mut client,
+        &[BUFFER_MAGIC, &[2], &[0; 1920]].concat()
+    )?);
+    assert!(!request(
+        &mut client,
+        &[BUFFER_MAGIC, &[2], &[0; 1919]].concat()
+    )?);
+    assert!(request(
+        &mut client,
+        &[BUFFER_MAGIC, &[3, 30, 0], &[0; 960]].concat()
+    )?);
+    assert!(!request(
+        &mut client,
+        &[BUFFER_MAGIC, &[3, 30, 0], &[0; 959]].concat()
+    )?);
     Ok(())
 }

@@ -247,8 +247,16 @@ impl WasmSandbox {
         if pointer == 0 || length == 0 || length > MAX_RESPONSE {
             bail!("invalid Wasm response span");
         }
-        let mut output = vec![0; length];
-        run.memory.read(&run.store, pointer as usize, &mut output)?;
+        let start = pointer as usize;
+        let end = start
+            .checked_add(length)
+            .context("Wasm response overflow")?;
+        let output = run
+            .memory
+            .data(&run.store)
+            .get(start..end)
+            .context("Wasm response exceeds linear memory")?
+            .to_vec();
         run.free.call(&mut run.store, pointer as i32)?;
         Ok(output)
     }

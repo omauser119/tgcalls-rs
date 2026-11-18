@@ -15,6 +15,7 @@ use rtc::{
         configuration::{media_engine::MediaEngine, setting_engine::SettingEngineBuilder},
         message::RTCMessage,
         sdp::RTCSessionDescription,
+        transport::RTCDtlsRole,
     },
     rtp::{Packet, header::Header},
     rtp_transceiver::rtp_sender::{
@@ -198,6 +199,25 @@ impl Engine {
         relay_only: bool,
         now: Instant,
     ) -> Result<Self> {
+        Self::build(local, ssrc, video, servers, relay_only, false, now)
+    }
+
+    pub fn group(local: SocketAddr, ssrc: u32, now: Instant) -> Result<Self> {
+        let mut engine = Self::build(local, ssrc, None, Vec::new(), false, true, now)?;
+        engine.one_way()?;
+        engine.pc.create_data_channel("data", None)?;
+        Ok(engine)
+    }
+
+    fn build(
+        local: SocketAddr,
+        ssrc: u32,
+        video: Option<VideoConfig>,
+        servers: Vec<IceServer>,
+        relay_only: bool,
+        group: bool,
+        now: Instant,
+    ) -> Result<Self> {
         if ssrc == 0 || ssrc >= u32::MAX - 1 || local.port() == 0 {
             return Err(Error::Invalid("invalid local transport or SSRC".into()));
         }
@@ -232,14 +252,15 @@ impl Engine {
                 RtpCodecKind::Video,
             )?;
         }
+        let mut settings = SettingEngineBuilder::default()
+            .with_multicast_dns_mode(rtc::ice::mdns::MulticastDnsMode::Disabled)
+            .with_discard_local_candidates_during_ice_restart(true);
+        if group {
+            settings = settings.with_answering_dtls_role(RTCDtlsRole::Server);
+        }
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_media_engine(media)
-            .with_setting_engine(
-                SettingEngineBuilder::default()
-                    .with_multicast_dns_mode(rtc::ice::mdns::MulticastDnsMode::Disabled)
-                    .with_discard_local_candidates_during_ice_restart(true)
-                    .build(),
-            )
+            .with_setting_engine(settings.build())
             .build(now)?;
         let audio_sender = pc.add_track(make_track(ssrc, RtpCodecKind::Audio, opus))?;
         let video_sender = if video.is_some() {
@@ -303,6 +324,10 @@ impl Engine {
             local_media_state: MediaState::default(),
         })
     }
+    pub fn offer_template(&mut self) -> Result<String> {
+        Ok(self.pc.create_offer(None)?.sdp)
+    }
+
     pub fn offer(&mut self) -> Result<String> {
         let offer = self.pc.create_offer(None)?;
         self.pc.set_local_description(Instant::now(), offer)?;

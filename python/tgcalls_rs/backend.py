@@ -87,11 +87,20 @@ class RustBackend:
             raise
 
     async def send_external_frame(self, chat_id, device, data: bytes, frame_data=None) -> int:
-        if getattr(device, "name", str(device)).upper() != "MICROPHONE":
+        kind = getattr(device, "name", str(device)).upper()
+        call = self._get(chat_id)
+        if kind in {"CAMERA", "SCREEN"}:
+            send_i420 = getattr(call, "send_i420", None)
+            if send_i420 is None:
+                raise NotImplementedError("this call has no external I420 transport")
+            if frame_data is None:
+                raise ValueError("external video requires frame dimensions")
+            return await send_i420(data, frame_data.width, frame_data.height)
+        if kind != "MICROPHONE":
             raise NotImplementedError("only microphone PCM frames are supported")
         if chat_id in self._muted:
             data = bytes(len(data))
-        return await self._get(chat_id).send_pcm(data)
+        return await call.send_pcm(data)
 
     async def receive(self, chat_id: int, timeout: float = 1):
         return await self._get(chat_id).receive(timeout)

@@ -69,6 +69,7 @@ static BOOL SupportsCaptureRate(uint32_t rate) {
     uint32_t _captureRate;
     uint16_t _captureChannels;
     BOOL _manageActivation;
+    BOOL _captureEnabled;
     BOOL _requested;
     BOOL _callKitActive;
     BOOL _interrupted;
@@ -80,10 +81,21 @@ static BOOL SupportsCaptureRate(uint32_t rate) {
                           capture:(TGCallsCaptureBlock)capture
                            render:(TGCallsRenderBlock)render
                           failure:(TGCallsAudioErrorBlock)failure {
+    return [self initWithQueue:queue manageSessionActivation:manageSessionActivation captureEnabled:YES
+                       capture:capture render:render failure:failure];
+}
+
+- (instancetype)initWithQueue:(dispatch_queue_t)queue
+          manageSessionActivation:(BOOL)manageSessionActivation
+                   captureEnabled:(BOOL)captureEnabled
+                          capture:(TGCallsCaptureBlock)capture
+                           render:(TGCallsRenderBlock)render
+                          failure:(TGCallsAudioErrorBlock)failure {
     self = [super init];
     if (self) {
         _queue = queue;
         _manageActivation = manageSessionActivation;
+        _captureEnabled = captureEnabled;
         _capture = [capture copy];
         _render = [render copy];
         _failure = [failure copy];
@@ -209,13 +221,16 @@ static BOOL SupportsCaptureRate(uint32_t rate) {
         return YES;
     }
     AVAudioSession *session = AVAudioSession.sharedInstance;
-    if (![session.category isEqualToString:AVAudioSessionCategoryPlayAndRecord] ||
+    if (_captureEnabled && (![session.category isEqualToString:AVAudioSessionCategoryPlayAndRecord] ||
         (_manageActivation && (![session.mode isEqualToString:AVAudioSessionModeVoiceChat] ||
-                               !(session.categoryOptions & AVAudioSessionCategoryOptionAllowBluetooth)))) {
+                               !(session.categoryOptions & AVAudioSessionCategoryOptionAllowBluetooth))))) {
         if (![session setCategory:AVAudioSessionCategoryPlayAndRecord mode:AVAudioSessionModeVoiceChat
                           options:AVAudioSessionCategoryOptionAllowBluetooth error:error]) {
             return NO;
         }
+    } else if (!_captureEnabled && _manageActivation &&
+               ![session setCategory:AVAudioSessionCategoryPlayback error:error]) {
+        return NO;
     }
     if (_manageActivation && !_activated) {
         if (![session setActive:YES error:error]) {
@@ -224,7 +239,9 @@ static BOOL SupportsCaptureRate(uint32_t rate) {
         _activated = YES;
     }
     AVAudioEngine *engine = [[AVAudioEngine alloc] init];
-    AVAudioInputNode *input = engine.inputNode;
+    TGCallsAudioQueues *buffers = [[TGCallsAudioQueues alloc] init];
+    AVAudioInputNode *input = _captureEnabled ? engine.inputNode : nil;
+    if (input) {
     AVAudioFormat *format = [input outputFormatForBus:0];
     if (!SupportsCaptureRate((uint32_t)format.sampleRate) || format.channelCount == 0 ||
         format.commonFormat != AVAudioPCMFormatFloat32 || format.isInterleaved) {
@@ -237,7 +254,6 @@ static BOOL SupportsCaptureRate(uint32_t rate) {
     _captureRate = (uint32_t)format.sampleRate;
     _captureChannels = (uint16_t)MIN(2, format.channelCount);
     uint16_t channels = _captureChannels;
-    TGCallsAudioQueues *buffers = [[TGCallsAudioQueues alloc] init];
     [input installTapOnBus:0 bufferSize:_captureRate / 100 format:format block:^(AVAudioPCMBuffer *buffer, AVAudioTime *time) {
         (void)time;
         float *const *planes = buffer.floatChannelData;
@@ -255,6 +271,7 @@ static BOOL SupportsCaptureRate(uint32_t rate) {
         }
         atomic_store_explicit(&queue->write, write + count, memory_order_release);
     }];
+    }
 
     AVAudioFormat *renderFormat = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:48000 channels:2];
     AVAudioSourceNode *source = [[AVAudioSourceNode alloc] initWithFormat:renderFormat renderBlock:^OSStatus(BOOL *isSilence, const AudioTimeStamp *timestamp, AVAudioFrameCount count, AudioBufferList *output) {
@@ -320,7 +337,9 @@ static BOOL SupportsCaptureRate(uint32_t rate) {
     }
     if (_engine) {
         [_engine stop];
-        [_engine.inputNode removeTapOnBus:0];
+        if (_captureEnabled) {
+            [_engine.inputNode removeTapOnBus:0];
+        }
         _engine = nil;
     }
     _buffers = nil;
@@ -328,7 +347,7 @@ static BOOL SupportsCaptureRate(uint32_t rate) {
 
 - (void)drainBlocks {
     TGCallsAudioQueues *buffers = _buffers;
-    if (!buffers) {
+    if (!buffers || !_captureEnabled) {
         return;
     }
     int16_t pcm[RenderBlockFrames * 2];

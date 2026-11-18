@@ -52,6 +52,25 @@ impl VideoConfig {
     }
 }
 
+/// Both configurations and the exact input span have been validated by the encoder.
+pub(crate) fn resize_i420(input: &[u8], from: &VideoConfig, to: &VideoConfig) -> Vec<u8> {
+    let mut result = Vec::with_capacity(to.bytes());
+    let y_size = from.width as usize * from.height as usize;
+    for (plane, divisor) in [(0, 1), (y_size, 2), (y_size + y_size / 4, 2)] {
+        let in_width = from.width as usize / divisor;
+        let in_height = from.height as usize / divisor;
+        let out_width = to.width as usize / divisor;
+        let out_height = to.height as usize / divisor;
+        for y in 0..out_height {
+            let row = plane + (y * in_height / out_height) * in_width;
+            for x in 0..out_width {
+                result.push(input[row + x * in_width / out_width]);
+            }
+        }
+    }
+    result
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VideoFrame {
     pub ssrc: u32,
@@ -206,6 +225,55 @@ pub fn annex_b_nals(bytes: &[u8]) -> Result<Vec<&[u8]>> {
 struct Bits {
     data: Vec<u8>,
     position: usize,
+}
+
+/// Preserve Annex-B headers and the slice's PPS identity for the SFU.
+pub(crate) fn conference_h264(access_unit: &[u8]) -> Result<(Vec<u8>, usize)> {
+    let mut normalized = Vec::with_capacity(access_unit.len());
+    let mut prefix = None;
+    for nal in annex_b_nals(access_unit)? {
+        let kind = nal[0] & 31;
+        if !matches!(kind, 1 | 5 | 6 | 7 | 8) {
+            continue;
+        }
+        if prefix.is_some() {
+            return Err(Error::Invalid(
+                "conference H264 requires one slice per access unit".into(),
+            ));
+        }
+        normalized.extend_from_slice(&[0, 0, 0, 1]);
+        if matches!(kind, 1 | 5) {
+            let mut positions = Vec::new();
+            let mut raw = Vec::new();
+            let mut zeros = 0;
+            for (index, &byte) in nal.iter().enumerate().skip(1).take(64) {
+                if zeros >= 2 && byte == 3 {
+                    zeros = 0;
+                    continue;
+                }
+                positions.push(index);
+                raw.push(byte);
+                zeros = if byte == 0 { zeros + 1 } else { 0 };
+            }
+            let mut bits = Bits {
+                data: raw,
+                position: 0,
+            };
+            bits.ue()?;
+            bits.ue()?;
+            bits.ue()?;
+            let header = *positions
+                .get(bits.position.div_ceil(8) - 1)
+                .ok_or_else(|| Error::Invalid("missing H264 slice header".into()))?
+                + 2;
+            prefix = Some(normalized.len() + header.min(nal.len()));
+        }
+        normalized.extend_from_slice(nal);
+    }
+    let prefix = prefix
+        .filter(|&prefix| prefix < normalized.len())
+        .ok_or_else(|| Error::Invalid("missing encryptable H264 slice".into()))?;
+    Ok((normalized, prefix))
 }
 impl Bits {
     fn bit(&mut self) -> Result<u32> {

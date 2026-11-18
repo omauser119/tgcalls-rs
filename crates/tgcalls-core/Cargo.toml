@@ -26,6 +26,9 @@ zeroize = { version = "1", features = ["derive"] }
 rusty_h264 = { git = "https://github.com/Remade-With-Rust/rusty_h264", rev = "67bd819fbc618f926fa529bc7dacd3caaba5a13a", default-features = false, features = ["std", "asm"] }
 nnnoiseless = { version = "=0.5.2", default-features = false }
 sonora = "=0.3.0"
+rff-core = { git = "https://github.com/Remade-With-Rust/remade_ffmpeg_rs", rev = "8523f574f7b3dc86e26673988d434a73ef8e699a" }
+rff-format = { git = "https://github.com/Remade-With-Rust/remade_ffmpeg_rs", rev = "8523f574f7b3dc86e26673988d434a73ef8e699a" }
+rff-format-ogg = { git = "https://github.com/Remade-With-Rust/remade_ffmpeg_rs", rev = "8523f574f7b3dc86e26673988d434a73ef8e699a" }
 
 [features]
 default = ["async"]

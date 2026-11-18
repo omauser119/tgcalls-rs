@@ -2,6 +2,8 @@
 
 [Новые замеры с равным объёмом PCM и исправленным ICE](pcm-ice/README.md)
 
+[PyTGCalls H.264 и E2E на нативном Rust и Wasmi](pytgcalls-h264-e2e/README.md)
+
 Историческая серия ниже использовала 20 мс на внешний вызов NTgCalls. Его
 аудиовход 3.0.7 обрабатывает первые 10 мс, поэтому старые междвижковые цифры
 CPU получены на разном объёме аудио. [Реализация аудиовхода NTgCalls](https://github.com/pytgcalls/ntgcalls/blob/v3.0.7/ntgcalls/src/media/audio_streamer.cpp)

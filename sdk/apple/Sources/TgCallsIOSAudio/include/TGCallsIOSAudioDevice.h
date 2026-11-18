@@ -14,6 +14,12 @@ typedef void (^TGCallsAudioErrorBlock)(NSError *error);
           manageSessionActivation:(BOOL)manageSessionActivation
                           capture:(TGCallsCaptureBlock)capture
                            render:(TGCallsRenderBlock)render
+                          failure:(TGCallsAudioErrorBlock)failure;
+- (instancetype)initWithQueue:(dispatch_queue_t)queue
+          manageSessionActivation:(BOOL)manageSessionActivation
+                   captureEnabled:(BOOL)captureEnabled
+                          capture:(TGCallsCaptureBlock)capture
+                           render:(TGCallsRenderBlock)render
                           failure:(TGCallsAudioErrorBlock)failure NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 

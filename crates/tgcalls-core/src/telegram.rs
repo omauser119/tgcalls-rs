@@ -6,6 +6,20 @@ use std::net::IpAddr;
 
 const MAX_JSON: usize = 65_536;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+pub struct GroupVideoSource {
+    pub ssrc: u32,
+    pub rtx: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GroupVideoSubscription {
+    pub endpoint: String,
+    pub sources: Vec<GroupVideoSource>,
+    pub min_height: u16,
+    pub max_height: u16,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fingerprint {
     pub hash: String,
@@ -43,6 +57,14 @@ fn attribute<'a>(sdp: &'a str, prefix: &str) -> Result<&'a str> {
 }
 
 pub fn join_payload(offer: &str, ssrc: u32) -> Result<String> {
+    join_media_payload(offer, ssrc, &[])
+}
+
+pub(crate) fn join_media_payload(
+    offer: &str,
+    ssrc: u32,
+    video: &[(u32, Option<u32>)],
+) -> Result<String> {
     validate_sdp(offer)?;
     let (hash, value) = attribute(offer, "a=fingerprint:")?
         .split_once(' ')
@@ -53,13 +75,22 @@ pub fn join_payload(offer: &str, ssrc: u32) -> Result<String> {
         setup: "passive".into(),
     };
     fingerprint(&fp)?;
+    let mut groups = Vec::new();
+    if video.len() > 1 {
+        groups.push(json!({"semantics":"SIM", "sources":video.iter().map(|(ssrc, _)| *ssrc as i32).collect::<Vec<_>>()}));
+    }
+    for (source, rtx) in video {
+        if let Some(rtx) = rtx {
+            groups.push(json!({"semantics":"FID", "sources":[*source as i32, *rtx as i32]}));
+        }
+    }
     Ok(json!({
         "ufrag": token(attribute(offer, "a=ice-ufrag:")?, 4, 256)?,
         "pwd": token(attribute(offer, "a=ice-pwd:")?, 22, 256)?,
         "fingerprints": [fp],
         // Telegram TL represents SSRCs as signed int32; preserve the bit pattern.
         "ssrc": ssrc as i32,
-        "ssrc-groups": []
+        "ssrc-groups": groups
     })
     .to_string())
 }
@@ -109,25 +140,36 @@ fn candidate(c: &Value) -> Result<Option<String>> {
 }
 
 pub fn answer_sdp(offer: &str, response: &str, remote_ssrcs: &[u32]) -> Result<String> {
-    remote_sdp(offer, response, remote_ssrcs, false)
+    remote_sdp(offer, response, remote_ssrcs, &[], false)
 }
 
+#[cfg(feature = "async")]
 pub(crate) fn sfu_offer_sdp(
     template: &str,
     response: &str,
     remote_ssrcs: &[u32],
 ) -> Result<String> {
-    remote_sdp(template, response, remote_ssrcs, true)
+    sfu_media_offer_sdp(template, response, remote_ssrcs, &[])
+}
+
+pub(crate) fn sfu_media_offer_sdp(
+    template: &str,
+    response: &str,
+    audio: &[u32],
+    video: &[GroupVideoSource],
+) -> Result<String> {
+    remote_sdp(template, response, audio, video, true)
 }
 
 fn remote_sdp(
     template: &str,
     response: &str,
     remote_ssrcs: &[u32],
+    remote_video: &[GroupVideoSource],
     sfu_offer: bool,
 ) -> Result<String> {
     validate_sdp(template)?;
-    if response.len() > MAX_JSON || remote_ssrcs.len() > 64 {
+    if response.len() > MAX_JSON || remote_ssrcs.len() > 64 || remote_video.len() > 16 {
         return Err(Error::Invalid("oversized Telegram signaling".into()));
     }
     let value: Value = serde_json::from_str(response).map_err(|e| Error::Invalid(e.to_string()))?;
@@ -200,16 +242,43 @@ fn remote_sdp(
     }
     result.push_str("a=msid-semantic: WMS *\r\n");
     let mut audio_index = 0;
-    for section in template.split("\r\nm=").skip(1) {
+    let mut video_index = 0;
+    let video_format = h264_format(&value["video"]).ok();
+    for (index, section) in template.split("\r\nm=").skip(1).enumerate() {
         let mut lines = section.lines();
         let media = lines
             .next()
             .ok_or_else(|| Error::Invalid("missing media".into()))?;
-        if !media.starts_with("audio ") && !media.starts_with("application ") {
-            return Err(Error::Invalid("audio-only Telegram engine".into()));
+        let is_video = media.starts_with("video ");
+        if !media.starts_with("audio ") && !media.starts_with("application ") && !is_video {
+            return Err(Error::Invalid("unsupported Telegram media".into()));
         }
-        result.push_str(&format!("m={media}\r\nc=IN IP4 0.0.0.0\r\n"));
+        if is_video && video_format.is_none() {
+            let mid = lines
+                .find_map(|line| line.strip_prefix("a=mid:"))
+                .ok_or_else(|| Error::Invalid("missing group video MID".into()))?;
+            token(mid, 1, 16)?;
+            result.push_str(&format!("m=video 0 UDP/TLS/RTP/SAVPF 100\r\nc=IN IP4 0.0.0.0\r\na=mid:{mid}\r\na=inactive\r\n"));
+            continue;
+        }
+        if let Some(format) = video_format.as_ref().filter(|_| is_video) {
+            let mut fields = media.split_ascii_whitespace();
+            let header = fields.by_ref().take(3).collect::<Vec<_>>().join(" ");
+            result.push_str(&format!(
+                "m={header} {}\r\nc=IN IP4 0.0.0.0\r\n{}",
+                format.payloads, format.attributes
+            ));
+        } else {
+            result.push_str(&format!("m={media}\r\nc=IN IP4 0.0.0.0\r\n"));
+        }
         for line in lines {
+            if is_video
+                && ["a=rtpmap:", "a=fmtp:", "a=rtcp-fb:", "a=extmap:"]
+                    .iter()
+                    .any(|prefix| line.starts_with(prefix))
+            {
+                continue;
+            }
             if [
                 "a=mid:",
                 "a=rtpmap:",
@@ -231,8 +300,10 @@ fn remote_sdp(
             "a=ice-ufrag:{ufrag}\r\na=ice-pwd:{pwd}\r\na=fingerprint:{} {}\r\na=setup:{setup}\r\n",
             fp.hash, fp.fingerprint
         ));
-        result.push_str(&candidate_lines);
-        result.push_str("a=end-of-candidates\r\n");
+        if index == 0 || !sfu_offer {
+            result.push_str(&candidate_lines);
+            result.push_str("a=end-of-candidates\r\n");
+        }
         if media.starts_with("audio ") {
             // First m-line sends our audio. Further lines receive individual SFU SSRCs.
             if audio_index == 0 {
@@ -243,8 +314,116 @@ fn remote_sdp(
                 return Err(Error::Invalid("unmatched remote audio transceiver".into()));
             }
             audio_index += 1;
+        } else if is_video {
+            if video_index == 0 {
+                result.push_str("a=recvonly\r\n");
+            } else if let Some(source) = remote_video.get(video_index - 1) {
+                let ssrc = source.ssrc;
+                result.push_str(&format!("a=sendonly\r\na=ssrc:{ssrc} cname:telegram\r\na=ssrc:{ssrc} msid:telegram video-{ssrc}\r\n"));
+                if let Some(rtx) = source
+                    .rtx
+                    .filter(|_| video_format.as_ref().is_some_and(|f| f.rtx))
+                {
+                    result.push_str(&format!(
+                        "a=ssrc-group:FID {ssrc} {rtx}\r\na=ssrc:{rtx} cname:telegram\r\n"
+                    ));
+                }
+            } else {
+                return Err(Error::Invalid("unmatched remote video transceiver".into()));
+            }
+            video_index += 1;
         }
     }
     validate_sdp(&result)?;
     Ok(result)
+}
+
+struct H264Format {
+    payloads: String,
+    attributes: String,
+    rtx: bool,
+}
+
+fn h264_format(video: &Value) -> Result<H264Format> {
+    let types = video["payload-types"]
+        .as_array()
+        .filter(|types| types.len() <= 64)
+        .ok_or_else(|| Error::Invalid("missing Telegram video payload types".into()))?;
+    let pt = |spec: &Value| -> Option<u8> {
+        u8::try_from(spec["id"].as_u64()?)
+            .ok()
+            .filter(|id| (96..=127).contains(id))
+    };
+    let (codec, id) = types
+        .iter()
+        .filter_map(|spec| Some((spec, pt(spec)?)))
+        .find(|(spec, _)| {
+            let profile = spec["parameters"]["profile-level-id"]
+                .as_str()
+                .unwrap_or("");
+            spec["name"]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("h264"))
+                && spec["clockrate"].as_u64() == Some(90_000)
+                && spec["parameters"]["packetization-mode"] == "1"
+                && profile.len() == 6
+                && profile.bytes().all(|b| b.is_ascii_hexdigit())
+                && profile[..4].eq_ignore_ascii_case("42e0")
+        })
+        .ok_or_else(|| {
+            Error::Invalid("Telegram SFU has no constrained-baseline H264 mode 1".into())
+        })?;
+    let profile = codec["parameters"]["profile-level-id"]
+        .as_str()
+        .ok_or_else(|| Error::Invalid("missing H264 profile".into()))?;
+    let id_text = id.to_string();
+    let rtx = types
+        .iter()
+        .filter_map(|spec| Some((spec, pt(spec)?)))
+        .find(|(spec, rtx)| {
+            *rtx != id
+                && spec["name"]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("rtx"))
+                && spec["clockrate"].as_u64() == Some(90_000)
+                && spec["parameters"]["apt"] == id_text.as_str()
+        })
+        .map(|(_, pt)| pt);
+    let mut attributes = format!(
+        "a=rtpmap:{id} H264/90000\r\na=fmtp:{id} level-asymmetry-allowed=1;packetization-mode=1;profile-level-id={profile}\r\na=rtcp-fb:{id} nack\r\na=rtcp-fb:{id} nack pli\r\n"
+    );
+    let payloads = if let Some(rtx) = rtx {
+        attributes.push_str(&format!(
+            "a=rtpmap:{rtx} rtx/90000\r\na=fmtp:{rtx} apt={id}\r\n"
+        ));
+        format!("{id} {rtx}")
+    } else {
+        id_text
+    };
+    if let Some(extensions) = video["rtp-hdrexts"]
+        .as_array()
+        .filter(|extensions| extensions.len() <= 32)
+    {
+        let mut used = std::collections::BTreeSet::new();
+        for ext in extensions {
+            if let (Some(id), Some(uri)) = (ext["id"].as_u64(), ext["uri"].as_str())
+                && (1..=255).contains(&id)
+                && matches!(
+                    uri,
+                    "urn:ietf:params:rtp-hdrext:sdes:mid"
+                        | "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id"
+                        | "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id"
+                        | "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+                )
+                && used.insert(id)
+            {
+                attributes.push_str(&format!("a=extmap:{id} {uri}\r\n"));
+            }
+        }
+    }
+    Ok(H264Format {
+        payloads,
+        attributes,
+        rtx: rtx.is_some(),
+    })
 }

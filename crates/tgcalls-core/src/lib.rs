@@ -3,7 +3,9 @@
 
 pub mod audio_processing;
 pub mod auth;
+pub mod broadcast;
 pub mod codec;
+pub mod group_crypto;
 mod ice_io;
 pub mod jitter;
 pub mod negotiation;

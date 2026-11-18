@@ -50,6 +50,16 @@ public struct VideoConfig: Codable, Sendable {
 public struct Datagram: Decodable, Sendable { public let peer: String; public let bytes: [UInt8] }
 public struct AudioFrame: Decodable, Sendable { public let ssrc: UInt32; public let timestamp: UInt32; public let pcm: [UInt8] }
 public struct VideoFrame: Decodable, Sendable { public let ssrc: UInt32; public let timestamp: UInt32; public let width: Int; public let height: Int; public let i420: [UInt8] }
+public struct ConferenceFrame: Decodable, Sendable {
+    public enum Kind: String, Decodable, Sendable { case audio, h264 }
+    public let id: UInt32
+    public let encrypt: Bool
+    public let kind: Kind
+    public let ssrc: UInt32
+    public let clearBytes: Int
+    public let bytes: [UInt8]
+    enum CodingKeys: String, CodingKey { case id, encrypt, kind, ssrc, bytes; case clearBytes = "clear_bytes" }
+}
 public struct WorkerResponse: Decodable, Sendable {
     public let ok: Bool
     public let error: String?
@@ -57,7 +67,8 @@ public struct WorkerResponse: Decodable, Sendable {
     public let audio: [AudioFrame]
     public let video: [VideoFrame]
     public let signaling: [[UInt8]]
-    enum CodingKeys: String, CodingKey { case ok, error, datagrams, audio, video, signaling }
+    public let conferenceFrames: [ConferenceFrame]
+    enum CodingKeys: String, CodingKey { case ok, error, datagrams, audio, video, signaling; case conferenceFrames = "conference_frames" }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         ok = try c.decode(Bool.self, forKey: .ok); error = try c.decodeIfPresent(String.self, forKey: .error)
@@ -65,5 +76,6 @@ public struct WorkerResponse: Decodable, Sendable {
         audio = try c.decodeIfPresent([AudioFrame].self, forKey: .audio) ?? []
         video = try c.decodeIfPresent([VideoFrame].self, forKey: .video) ?? []
         signaling = try c.decodeIfPresent([[UInt8]].self, forKey: .signaling) ?? []
+        conferenceFrames = try c.decodeIfPresent([ConferenceFrame].self, forKey: .conferenceFrames) ?? []
     }
 }

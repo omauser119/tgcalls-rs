@@ -1628,6 +1628,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rff-core"
+version = "0.5.0"
+source = "git+https://github.com/Remade-With-Rust/remade_ffmpeg_rs?rev=8523f574f7b3dc86e26673988d434a73ef8e699a#8523f574f7b3dc86e26673988d434a73ef8e699a"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rff-format"
+version = "0.5.0"
+source = "git+https://github.com/Remade-With-Rust/remade_ffmpeg_rs?rev=8523f574f7b3dc86e26673988d434a73ef8e699a#8523f574f7b3dc86e26673988d434a73ef8e699a"
+dependencies = [
+ "rff-core",
+]
+
+[[package]]
+name = "rff-format-ogg"
+version = "0.5.0"
+source = "git+https://github.com/Remade-With-Rust/remade_ffmpeg_rs?rev=8523f574f7b3dc86e26673988d434a73ef8e699a#8523f574f7b3dc86e26673988d434a73ef8e699a"
+dependencies = [
+ "rff-core",
+ "rff-format",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2392,6 +2417,9 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "nnnoiseless",
+ "rff-core",
+ "rff-format",
+ "rff-format-ogg",
  "rtc",
  "rusty-opus",
  "rusty_h264",

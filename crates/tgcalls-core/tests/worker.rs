@@ -150,26 +150,7 @@ fn worker_group_answers_controlling_sfu_and_sends_audio() -> Result<(), Box<dyn 
     let mut sfu = Engine::new(remote, 202, None, Instant::now())?;
     sfu.personal_channel()?;
     let offer = sfu.offer()?;
-    let attribute = |prefix| {
-        offer
-            .lines()
-            .find_map(|line| line.strip_prefix(prefix))
-            .ok_or("missing SDP attribute")
-    };
-    let (hash, fp) = attribute("a=fingerprint:")?
-        .split_once(' ')
-        .ok_or("invalid fingerprint")?;
-    let candidates: Vec<_> = offer.lines().filter_map(|line| line.strip_prefix("a=candidate:"))
-        .map(|c| {
-            let fields: Vec<_> = c.split_whitespace().collect();
-            if fields.len() < 8 { return Err("invalid candidate"); }
-            Ok(json!({"foundation":fields[0], "component":fields[1], "protocol":fields[2], "priority":fields[3], "ip":fields[4], "port":fields[5], "type":fields[7]}))
-        }).collect::<Result<_, _>>()?;
-    let params = json!({"transport":{
-        "ufrag":attribute("a=ice-ufrag:")?, "pwd":attribute("a=ice-pwd:")?,
-        "fingerprints":[{"hash":hash, "setup":"active", "fingerprint":fp}], "candidates":candidates,
-    }})
-    .to_string();
+    let params = json!({"transport": sfu_transport(&offer)?}).to_string();
     let result = execute(&mut client, json!({"op":"group_connect", "params":params}))?;
     let answer = result["payload"].as_str().ok_or("missing group answer")?;
     assert!(answer.contains("a=setup:passive"));
@@ -212,6 +193,68 @@ fn worker_group_answers_controlling_sfu_and_sends_audio() -> Result<(), Box<dyn 
         sfu.connection_state
     )
     .into())
+}
+
+fn sfu_transport(offer: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    let attribute = |prefix| {
+        offer
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .ok_or("missing SDP attribute")
+    };
+    let (hash, fp) = attribute("a=fingerprint:")?
+        .split_once(' ')
+        .ok_or("invalid fingerprint")?;
+    let candidates: Vec<_> = offer.lines().filter_map(|line| line.strip_prefix("a=candidate:"))
+        .map(|c| {
+            let fields: Vec<_> = c.split_whitespace().collect();
+            if fields.len() < 8 { return Err("invalid candidate"); }
+            Ok(json!({"foundation":fields[0], "component":fields[1], "protocol":fields[2], "priority":fields[3], "ip":fields[4], "port":fields[5], "type":fields[7]}))
+        }).collect::<Result<_, _>>()?;
+    Ok(json!({
+        "ufrag":attribute("a=ice-ufrag:")?, "pwd":attribute("a=ice-pwd:")?,
+        "fingerprints":[{"hash":hash, "setup":"active", "fingerprint":fp}], "candidates":candidates,
+    }))
+}
+
+#[test]
+fn group_worker_emits_simulcast_and_negotiates_sfu_h264_payload_types()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut client = Worker::default();
+    execute(
+        &mut client,
+        json!({"op":"new", "group":true, "local":"127.0.0.1:42005", "ssrc":400,
+        "video_layers":[{"width":32,"height":32,"fps":10,"bitrate":64_000},
+                        {"width":64,"height":64,"fps":10,"bitrate":128_000}]}),
+    )?;
+    let join = execute(&mut client, json!({"op":"group_payload"}))?;
+    let payload: Value =
+        serde_json::from_str(join["payload"].as_str().ok_or("missing join payload")?)?;
+    assert_eq!(
+        payload["ssrc-groups"],
+        json!([
+            {"semantics":"SIM", "sources":[401, 403]},
+            {"semantics":"FID", "sources":[401, 402]},
+            {"semantics":"FID", "sources":[403, 404]},
+        ])
+    );
+    let mut sfu = Engine::new("127.0.0.1:42006".parse()?, 501, None, Instant::now())?;
+    let offer = sfu.offer()?;
+    let params = json!({"transport": sfu_transport(&offer)?, "video": {"payload-types":[
+        {"name":"H264", "id":108, "clockrate":90000, "parameters":{"packetization-mode":"1", "profile-level-id":"42e01f"}},
+        {"name":"rtx", "id":109, "clockrate":90000, "parameters":{"apt":"108"}},
+    ]}}).to_string();
+    let result = execute(&mut client, json!({"op":"group_connect", "params":params}))?;
+    let answer = result["payload"].as_str().ok_or("missing group answer")?;
+    assert!(answer.contains("a=rtpmap:108 H264/90000"));
+    assert!(answer.contains("a=rtpmap:109 rtx/90000"));
+    execute(
+        &mut client,
+        json!({"op":"group_video","subscriptions":[{
+            "endpoint":"other", "sources":[{"ssrc":502,"rtx":503}], "min_height":180,"max_height":360,
+        }]}),
+    )?;
+    Ok(())
 }
 
 #[test]

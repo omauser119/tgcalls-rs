@@ -3,9 +3,11 @@ use crate::{
     AudioFrame, Error, Result,
     audio_processing::{VoiceOptions, VoiceProcessor},
     auth::{AuthKey, KeyExchange},
+    group_crypto::ConferenceFrame,
     negotiation::{IceServer, MediaContent, contents_from_sdp, setup_from_sdp, synthesize_answer},
     sansio::{Datagram, Engine, MediaState},
     signaling::Signaling,
+    telegram::{GroupVideoSource, GroupVideoSubscription},
     video::{VideoConfig, VideoFrame},
 };
 use serde::{Deserialize, Serialize};
@@ -32,6 +34,10 @@ pub enum Request {
         relay_only: bool,
         #[serde(default)]
         group: bool,
+        #[serde(default)]
+        video_layers: Vec<VideoConfig>,
+        #[serde(default)]
+        conference: bool,
     },
     Offer,
     Answer {
@@ -96,6 +102,9 @@ pub enum Request {
     GroupSources {
         ssrcs: Vec<u32>,
     },
+    GroupVideo {
+        subscriptions: Vec<GroupVideoSubscription>,
+    },
 }
 #[derive(Serialize, Deserialize)]
 pub struct Response {
@@ -110,6 +119,8 @@ pub struct Response {
     pub video: Vec<VideoFrame>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signaling: Vec<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conference_frames: Vec<ConferenceFrame>,
 }
 impl Response {
     fn success() -> Self {
@@ -121,6 +132,7 @@ impl Response {
             audio: vec![],
             video: vec![],
             signaling: vec![],
+            conference_frames: vec![],
         }
     }
 }
@@ -151,6 +163,7 @@ pub struct Worker {
     group: bool,
     group_transport: Option<String>,
     group_sources: Vec<u32>,
+    group_video_sources: Vec<GroupVideoSource>,
     ssrc: u32,
     voice: Option<VoiceProcessor>,
     captured: Option<Vec<u8>>,
@@ -199,6 +212,15 @@ impl Worker {
                 response.payload =
                     self.capture(pcm, u16::from_le_bytes([*low, *high]), Instant::now())?;
             }
+            [4, frame @ ..] => self.engine()?.send_video(frame, Instant::now())?,
+            [6, part @ ..] if self.engine.is_none() => {
+                response.audio = crate::broadcast::decode_ogg_part(part)?;
+            }
+            [5, a, b, c, d, frame @ ..] => self.engine()?.apply_conference_frame(
+                u32::from_le_bytes([*a, *b, *c, *d]),
+                frame,
+                Instant::now(),
+            )?,
             _ => return Err(Error::Invalid("invalid host buffer or call state".into())),
         }
         self.collect(response)
@@ -234,6 +256,8 @@ impl Worker {
                 ice_servers,
                 relay_only,
                 group,
+                video_layers,
+                conference,
             } => {
                 if self.engine.is_some() || ssrc == 0 {
                     return Err(Error::Invalid("already initialized or invalid SSRC".into()));
@@ -242,13 +266,27 @@ impl Worker {
                     .parse()
                     .map_err(|_| Error::Invalid("local address".into()))?;
                 self.engine = Some(if group {
-                    if video.is_some() || relay_only || !ice_servers.is_empty() {
+                    if relay_only
+                        || !ice_servers.is_empty()
+                        || (video.is_some() && !video_layers.is_empty())
+                    {
                         return Err(Error::Invalid("unsupported group transport options".into()));
                     }
-                    Engine::group(local, ssrc, now)?
+                    let layers = if video_layers.is_empty() {
+                        video.into_iter().collect()
+                    } else {
+                        video_layers
+                    };
+                    Engine::group(local, ssrc, layers, now)?
                 } else {
+                    if !video_layers.is_empty() {
+                        return Err(Error::Invalid("simulcast layers require group mode".into()));
+                    }
                     Engine::with_ice(local, ssrc, video, ice_servers, relay_only, now)?
                 });
+                if conference {
+                    self.engine()?.require_conference_crypto();
+                }
                 self.group = group;
                 self.ssrc = ssrc;
             }
@@ -409,7 +447,10 @@ impl Worker {
                     return Err(Error::Invalid("initialize a group worker first".into()));
                 }
                 let offer = self.engine()?.offer_template()?;
-                response.payload = json!(crate::telegram::join_payload(&offer, self.ssrc)?);
+                let video = self.engine()?.video_sources();
+                response.payload = json!(crate::telegram::join_media_payload(
+                    &offer, self.ssrc, &video
+                )?);
                 self.offer = Some(offer);
             }
             Request::GroupConnect { params } => {
@@ -418,18 +459,17 @@ impl Worker {
                     .as_ref()
                     .filter(|_| self.group)
                     .ok_or_else(|| Error::Invalid("generate group payload first".into()))?;
-                let sdp = crate::telegram::sfu_offer_sdp(offer, &params, &self.group_sources)?;
+                let sdp = crate::telegram::sfu_media_offer_sdp(
+                    offer,
+                    &params,
+                    &self.group_sources,
+                    &self.group_video_sources,
+                )?;
                 response.payload = json!(self.engine()?.answer(sdp)?);
                 self.group_transport = Some(params);
             }
             Request::GroupSources { ssrcs } => {
-                let params = self
-                    .group_transport
-                    .as_ref()
-                    .ok_or_else(|| {
-                        Error::Invalid("connect to the SFU before adding sources".into())
-                    })?
-                    .clone();
+                self.require_group_transport()?;
                 if ssrcs.len() > 64 || ssrcs.contains(&0) || ssrcs.contains(&self.ssrc) {
                     return Err(Error::Invalid("invalid remote group sources".into()));
                 }
@@ -447,13 +487,10 @@ impl Worker {
                         self.engine()?.add_receiver(false)?;
                         self.group_sources.push(ssrc);
                     }
-                    let template = self.engine()?.offer_template()?;
-                    let sdp =
-                        crate::telegram::sfu_offer_sdp(&template, &params, &self.group_sources)?;
-                    self.engine()?.answer(sdp)?;
-                    self.offer = Some(template);
+                    self.refresh_group_offer()?;
                 }
             }
+            Request::GroupVideo { subscriptions } => self.group_video(subscriptions)?,
         }
         self.collect(response)
     }
@@ -463,8 +500,108 @@ impl Worker {
             response.datagrams = engine.outgoing()?;
             response.audio = engine.audio.drain(..).collect();
             response.video = engine.video.drain(..).collect();
+            response.conference_frames = engine.conference_frames();
         }
         Ok(response)
+    }
+
+    fn require_group_transport(&self) -> Result<&str> {
+        self.group_transport
+            .as_deref()
+            .ok_or_else(|| Error::Invalid("connect to the SFU before adding sources".into()))
+    }
+
+    fn refresh_group_offer(&mut self) -> Result<()> {
+        let template = self.engine()?.offer_template()?;
+        let sdp = crate::telegram::sfu_media_offer_sdp(
+            &template,
+            self.require_group_transport()?,
+            &self.group_sources,
+            &self.group_video_sources,
+        )?;
+        self.engine()?.answer(sdp)?;
+        self.offer = Some(template);
+        Ok(())
+    }
+
+    fn group_video(&mut self, subscriptions: Vec<GroupVideoSubscription>) -> Result<()> {
+        self.require_group_transport()?;
+        let own = self.engine()?.video_sources();
+        if own.is_empty() || subscriptions.len() > 8 {
+            return Err(Error::Invalid(
+                "group video disabled or endpoint limit reached".into(),
+            ));
+        }
+        let mut identities: BTreeSet<_> = self.group_sources.iter().copied().collect();
+        identities.insert(self.ssrc);
+        for (source, rtx) in own {
+            identities.insert(source);
+            identities.extend(rtx);
+        }
+        let mut selected = Vec::new();
+        let mut on_stage = Vec::new();
+        let mut limits = serde_json::Map::new();
+        for sub in subscriptions {
+            crate::telegram::token(&sub.endpoint, 1, 128)?;
+            if limits.contains_key(&sub.endpoint)
+                || sub.sources.is_empty()
+                || sub.sources.len() > 3
+                || !matches!(sub.min_height, 0 | 180 | 360 | 720)
+                || !matches!(sub.max_height, 180 | 360 | 720)
+                || sub.min_height > sub.max_height
+            {
+                return Err(Error::Invalid("invalid group video subscription".into()));
+            }
+            for source in sub.sources {
+                if source.ssrc == 0
+                    || !identities.insert(source.ssrc)
+                    || source
+                        .rtx
+                        .is_some_and(|rtx| rtx == 0 || !identities.insert(rtx))
+                {
+                    return Err(Error::Invalid("conflicting group video source".into()));
+                }
+                if !self.group_video_sources.contains(&source) {
+                    if self.group_video_sources.iter().any(|old| {
+                        old.ssrc == source.ssrc
+                            || old.rtx == Some(source.ssrc)
+                            || source
+                                .rtx
+                                .is_some_and(|rtx| rtx == old.ssrc || old.rtx == Some(rtx))
+                    }) {
+                        return Err(Error::Invalid(
+                            "group video SSRC changed association".into(),
+                        ));
+                    }
+                    selected.push(source);
+                }
+            }
+            if sub.max_height == 720 {
+                on_stage.push(sub.endpoint.clone());
+            }
+            limits.insert(
+                sub.endpoint,
+                json!({"minHeight": sub.min_height,"maxHeight": sub.max_height}),
+            );
+        }
+        if self.group_video_sources.len() + selected.len() > 16 {
+            return Err(Error::Invalid(
+                "group video source limit reached; rejoin required".into(),
+            ));
+        }
+        if !selected.is_empty() {
+            for source in selected {
+                self.engine()?.add_receiver(true)?;
+                self.group_video_sources.push(source);
+            }
+            self.refresh_group_offer()?;
+        }
+        self.engine()?.set_video_constraints(
+            json!({"colibriClass":"ReceiverVideoConstraints",
+            "defaultConstraints":{"maxHeight":0},"onStageEndpoints":on_stage,"constraints":limits})
+            .to_string(),
+        );
+        Ok(())
     }
 }
 

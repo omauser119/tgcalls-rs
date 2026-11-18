@@ -21,7 +21,6 @@ impl Encoder {
         self.encode_pcm::<false>(pcm).map(|(packet, _)| packet)
     }
 
-    #[cfg(feature = "async")]
     pub(crate) fn encode_with_level(&mut self, pcm: &[u8]) -> Result<(Vec<u8>, u8)> {
         self.encode_pcm::<true>(pcm)
     }

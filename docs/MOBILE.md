@@ -20,7 +20,7 @@ must restrict destinations/rates to the call's negotiated peers/relays. Media an
 control requests currently copy through bounded JSON buffers; there is **no claim
 of zero-copy media on these mobile bridges**. Linux audio retains its shared ring.
 
-## iOS: working interpreter boundary
+## iOS interpreter and app integration
 
 No helper-process launch, private XPC API, JIT entitlement or writable executable
 memory is required. Wasm is translated to **interpreter bytecode**, not native
@@ -31,9 +31,12 @@ This design does not promise App Review approval.
 The default limits are 256 MiB linear memory, one memory/table/instance,
 100,000 table elements, 2 billion fuel units per request, 8 MiB input and 32 MiB
 output. The import allowlist excludes network creation and blocking poll/sleep.
-The empty WASI context inherits no descriptors, directories, arguments or
-environment. Clocks and OS entropy are available; filesystem imports have no
-directory capability. Protocol datagrams cross an explicit request/response API.
+The restricted WASI host exposes clocks and up to 64 KiB of entropy per
+request. It provides an empty environment and rejects filesystem operations.
+The `wasm32-wasip1` Rust standard library supplies portable clock and entropy
+entry points used by webrtc-rs and DTLS. The mobile build has no dependency on
+the generic WASI host or its `rustix` version. Protocol datagrams cross an
+explicit request/response API.
 
 A memory fault, panic/abort or fuel exhaustion becomes an interpreter trap.
 The complete instance is discarded; generation increases and the next request
@@ -52,10 +55,13 @@ TGCALLS_WORKER_WASM="$PWD/artifacts/tgcalls-worker.wasm" \
   cargo test --locked -p tgcalls-isolation --features worker-tests
 ```
 
-On macOS with Xcode, `bash scripts/build-apple.sh` builds an XCFramework for iOS
-device and simulator. Add it and the Swift client sources to the app, and add
-`artifacts/tgcalls-worker.wasm` to Copy Bundle Resources. For Swift Package builds,
-link the static library with `-Xlinker -L/path/to/target/release`.
+On macOS with Xcode, `bash scripts/build-apple.sh` builds the XCFramework with
+an arm64 device slice plus arm64 and x86_64 simulator slices. Use `--device-only`
+for an iPhone archive. The framework includes the C ABI and Objective-C
+audio device. Copy `TgCallsRust.xcframework/Resources/tgcalls-worker.wasm` into
+the host app bundle. Swift hosts can set the memory and fuel limits through
+`WasmLimits`. For Swift Package host tests, link the native static library
+with `-Xlinker -L/path/to/target/release`.
 
 ```swift
 let url = Bundle.main.url(forResource: "tgcalls-worker", withExtension: "wasm")!
@@ -71,6 +77,22 @@ production. Missing/invalid modules cause initialization failure; no native-mode
 fallback occurs. The Swift test target exercises a real Wasm worker; it requires
 `build-wasm.sh` first. Device signing, audio sessions, CallKit and real Telegram
 interoperability require embedding-app/device validation.
+
+The Objective-C `TGCallsIOSAudioDevice` uses `AVAudioSession` and
+`AVAudioEngine`. With app-owned activation it waits for the call session and
+CallKit signals. With standalone activation it configures `.playAndRecord`
+and `.voiceChat`. The render callback writes actual stereo playback samples
+to the echo reference queue. The serial host drains 10-ms blocks for Sonora,
+then submits the captured PCM. Route and interruption notifications rebuild
+the graph and retain bounded real-time capture/playback queues.
+
+The [Telegram iOS fork](https://github.com/omauser119/Telegram-iOS/tree/calls-rust)
+owns MTProto, authenticated key establishment, CallKit and network routing.
+The comparative build picks Rust plus Wasmi when the persistent **Calls
+Harden Mode** debug option is enabled. It also includes the reference engine
+to support user-controlled comparison. The unattended `iphoneos` job builds
+an arm64 IPA for manual signing and checks the Mach-O platform plus the
+bundled Wasm digest before uploading.
 
 ## Request protocol
 
@@ -106,13 +128,33 @@ datagrams from every response**, including negotiation and tick responses.
    socket address with `rebind_personal(local)` and forward new signaling and ICE.
    Destroy the client to end a call. Create a new one after isolation failure.
 
-Group audio uses `group_payload` → `phone.joinGroupCall` → `group_connect(params)`;
-the Linux Python adapter also manages remote audio SSRCs. The host-driven UDP
-path gathers server-reflexive and relayed candidates from standard STUN/TURN
-endpoints. Mobile NAT, roaming and relay paths need device validation.
-Telegram reflector/MTProto media transport, V3 signaling and simulcast are not
-implemented. Core personal/video support is not yet exposed by the legacy Python
-NTgCalls adapter. See COMPATIBILITY.md for the current scope.
+Group calls use `group_payload`, `phone.joinGroupCall`, `group_connect(params)`
+and `group_sources(ssrcs)`. `video_layers` configures up to three increasing
+H.264 resolutions as independent RTP encodings. The join payload includes
+`SIM` and `FID` source groups. `group_video` applies H.264 source subscriptions
+and sends receiver constraints on SCTP. The fork uses the same group path for
+ReplayKit presentations with their own join and audio source.
+
+Binary requests use `54 47 43 01` followed by an opcode and a bounded byte
+span. Opcodes 1 through 4 take the app-verified 256-byte key, rendered PCM,
+captured PCM with a little-endian 16-bit delay, and a full I420 frame.
+In conference mode the worker emits `conference_frames` before emitting
+outbound media or decoding received media. Opcode 5 takes the four-byte
+little-endian request ID followed by the authenticated transform result.
+An empty result drops the frame. The host uses its existing `tde2e` call state
+and app-authenticated participants to resolve the sender's user ID.
+
+Opcode 6 decodes a broadcast audio part through Remade FFmpeg's Ogg demuxer
+and RustyOpus. A playback-only host requests one-second parts over MTProto
+and drains decoded 20-ms PCM blocks. The implementation covers automatic
+broadcast audio. RTMP and broadcast video retain their existing client path.
+
+The personal iOS bridge uses MTProto V2 signaling and standard TURN over UDP.
+Telegram-specific media reflectors, V3 signaling and roaming through a change
+of address family need further work. The local video benchmark uses the
+PyTGCalls external-frame path with a pre-negotiated loopback media session.
+Full PyTGCalls conference join integration remains open.
+[H.264/E2E benchmark results](results/pytgcalls-h264-e2e/README.md)
 
 ## macOS XPC
 

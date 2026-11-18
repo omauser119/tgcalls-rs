@@ -1,0 +1,452 @@
+{
+  "scenario": "loss-jitter",
+  "duration_seconds": 4,
+  "isolated_processes": true,
+  "kernel": "7.2.11-arch1-1",
+  "python": "3.14.8",
+  "baseline_native_revision": "db54b5d",
+  "ntgcalls": "3.0.7",
+  "results": [
+    {
+      "mode": "standard",
+      "scenario": {
+        "name": "loss-jitter",
+        "loss_percent": 5,
+        "jitter_ms": 40,
+        "delay_ms": 20
+      },
+      "concurrent_calls": 1,
+      "connection_setup_ms": [
+        209.717795
+      ],
+      "rtt_ms": {
+        "count": 193,
+        "median": 146.129703,
+        "p95": 154.35005040000001,
+        "p99": 154.86995964
+      },
+      "frames": {
+        "sent": 200,
+        "received": 193,
+        "concealed": 5,
+        "unmatched": 7
+      },
+      "resources": {
+        "cpu_seconds": 1.0668882590000002,
+        "wall_seconds": 5.02581877499324,
+        "cpu_core_percent": 21.228148223498867,
+        "peak_tree_rss_bytes": 36999168,
+        "peak_parent_rss_bytes": 36999168,
+        "peak_worker_rss_bytes": 0,
+        "worker_voluntary_switches": 0,
+        "sample_interval_ms": 50,
+        "samples": 99
+      },
+      "engine_stats": [
+        {
+          "generation": 0,
+          "hardened": false,
+          "last_error": null,
+          "media": {
+            "concealed_frames": 24,
+            "connection_state": "Connected",
+            "dropped_frames": 5,
+            "received_frames": 242,
+            "received_video_frames": 0,
+            "sent_frames": 225,
+            "sent_video_frames": 0
+          },
+          "needs_rejoin": false
+        }
+      ],
+      "repetition": 0,
+      "implementation": "before"
+    },
+    {
+      "mode": "standard",
+      "scenario": {
+        "name": "loss-jitter",
+        "loss_percent": 5,
+        "jitter_ms": 40,
+        "delay_ms": 20
+      },
+      "concurrent_calls": 1,
+      "connection_setup_ms": [
+        211.038875
+      ],
+      "rtt_ms": {
+        "count": 194,
+        "median": 149.2627095,
+        "p95": 157.51071105,
+        "p99": 158.06811356
+      },
+      "frames": {
+        "sent": 200,
+        "received": 194,
+        "concealed": 5,
+        "unmatched": 6
+      },
+      "resources": {
+        "cpu_seconds": 0.930544884,
+        "wall_seconds": 5.030054996997933,
+        "cpu_core_percent": 18.499696018341215,
+        "peak_tree_rss_bytes": 39395328,
+        "peak_parent_rss_bytes": 39395328,
+        "peak_worker_rss_bytes": 0,
+        "worker_voluntary_switches": 0,
+        "sample_interval_ms": 50,
+        "samples": 99
+      },
+      "engine_stats": [
+        {
+          "generation": 0,
+          "hardened": false,
+          "last_error": null,
+          "media": {
+            "concealed_frames": 25,
+            "connection_state": "Connected",
+            "dropped_frames": 5,
+            "received_frames": 244,
+            "received_video_frames": 0,
+            "sent_frames": 225,
+            "sent_video_frames": 0
+          },
+          "needs_rejoin": false
+        }
+      ],
+      "repetition": 0,
+      "implementation": "current"
+    },
+    {
+      "mode": "hardened",
+      "scenario": {
+        "name": "loss-jitter",
+        "loss_percent": 5,
+        "jitter_ms": 40,
+        "delay_ms": 20
+      },
+      "concurrent_calls": 1,
+      "connection_setup_ms": [
+        214.901042
+      ],
+      "rtt_ms": {
+        "count": 193,
+        "median": 146.347554,
+        "p95": 155.9112292,
+        "p99": 156.29905576
+      },
+      "frames": {
+        "sent": 200,
+        "received": 193,
+        "concealed": 5,
+        "unmatched": 7
+      },
+      "resources": {
+        "cpu_seconds": 1.1011507490000005,
+        "wall_seconds": 5.014651135999884,
+        "cpu_core_percent": 21.958671084712243,
+        "peak_tree_rss_bytes": 43229184,
+        "peak_parent_rss_bytes": 32874496,
+        "peak_worker_rss_bytes": 10354688,
+        "worker_voluntary_switches": 794,
+        "sample_interval_ms": 50,
+        "samples": 98
+      },
+      "engine_stats": [
+        {
+          "generation": 0,
+          "hardened": true,
+          "last_error": null,
+          "media": {
+            "concealed_frames": 24,
+            "connection_state": "Connected",
+            "dropped_frames": 5,
+            "received_frames": 242,
+            "received_video_frames": 0,
+            "sent_frames": 225,
+            "sent_video_frames": 0
+          },
+          "needs_rejoin": false
+        }
+      ],
+      "repetition": 0,
+      "implementation": "before"
+    },
+    {
+      "mode": "hardened",
+      "scenario": {
+        "name": "loss-jitter",
+        "loss_percent": 5,
+        "jitter_ms": 40,
+        "delay_ms": 20
+      },
+      "concurrent_calls": 1,
+      "connection_setup_ms": [
+        214.07595
+      ],
+      "rtt_ms": {
+        "count": 194,
+        "median": 151.93014399999998,
+        "p95": 160.31617615000002,
+        "p99": 161.00683992
+      },
+      "frames": {
+        "sent": 200,
+        "received": 194,
+        "concealed": 5,
+        "unmatched": 6
+      },
+      "resources": {
+        "cpu_seconds": 0.9270929060000002,
+        "wall_seconds": 5.0198066489974735,
+        "cpu_core_percent": 18.46869751816345,
+        "peak_tree_rss_bytes": 46030848,
+        "peak_parent_rss_bytes": 33685504,
+        "peak_worker_rss_bytes": 12345344,
+        "worker_voluntary_switches": 787,
+        "sample_interval_ms": 50,
+        "samples": 98
+      },
+      "engine_stats": [
+        {
+          "generation": 0,
+          "hardened": true,
+          "last_error": null,
+          "media": {
+            "concealed_frames": 24,
+            "connection_state": "Connected",
+            "dropped_frames": 5,
+            "received_frames": 243,
+            "received_video_frames": 0,
+            "sent_frames": 225,
+            "sent_video_frames": 0
+          },
+          "needs_rejoin": false
+        }
+      ],
+      "repetition": 0,
+      "implementation": "current"
+    },
+    {
+      "mode": "hardened",
+      "scenario": {
+        "name": "loss-jitter",
+        "loss_percent": 5,
+        "jitter_ms": 40,
+        "delay_ms": 20
+      },
+      "concurrent_calls": 1,
+      "connection_setup_ms": [
+        214.660696
+      ],
+      "rtt_ms": {
+        "count": 192,
+        "median": 153.86059699999998,
+        "p95": 169.0734264,
+        "p99": 169.55108218
+      },
+      "frames": {
+        "sent": 200,
+        "received": 192,
+        "concealed": 5,
+        "unmatched": 8
+      },
+      "resources": {
+        "cpu_seconds": 0.909020028,
+        "wall_seconds": 5.022646397999779,
+        "cpu_core_percent": 18.09842772053411,
+        "peak_tree_rss_bytes": 46088192,
+        "peak_parent_rss_bytes": 33705984,
+        "peak_worker_rss_bytes": 12382208,
+        "worker_voluntary_switches": 759,
+        "sample_interval_ms": 50,
+        "samples": 98
+      },
+      "engine_stats": [
+        {
+          "generation": 0,
+          "hardened": true,
+          "last_error": null,
+          "media": {
+            "concealed_frames": 24,
+            "connection_state": "Connected",
+            "dropped_frames": 5,
+            "received_frames": 241,
+            "received_video_frames": 0,
+            "sent_frames": 225,
+            "sent_video_frames": 0
+          },
+          "needs_rejoin": false
+        }
+      ],
+      "repetition": 1,
+      "implementation": "current"
+    },
+    {
+      "mode": "hardened",
+      "scenario": {
+        "name": "loss-jitter",
+        "loss_percent": 5,
+        "jitter_ms": 40,
+        "delay_ms": 20
+      },
+      "concurrent_calls": 1,
+      "connection_setup_ms": [
+        214.996594
+      ],
+      "rtt_ms": {
+        "count": 193,
+        "median": 152.690969,
+        "p95": 160.4658272,
+        "p99": 161.3231876
+      },
+      "frames": {
+        "sent": 200,
+        "received": 193,
+        "concealed": 5,
+        "unmatched": 7
+      },
+      "resources": {
+        "cpu_seconds": 1.023906466,
+        "wall_seconds": 5.056630161001522,
+        "cpu_core_percent": 20.248790862672145,
+        "peak_tree_rss_bytes": 42995712,
+        "peak_parent_rss_bytes": 32796672,
+        "peak_worker_rss_bytes": 10199040,
+        "worker_voluntary_switches": 801,
+        "sample_interval_ms": 50,
+        "samples": 99
+      },
+      "engine_stats": [
+        {
+          "generation": 0,
+          "hardened": true,
+          "last_error": null,
+          "media": {
+            "concealed_frames": 26,
+            "connection_state": "Connected",
+            "dropped_frames": 5,
+            "received_frames": 244,
+            "received_video_frames": 0,
+            "sent_frames": 225,
+            "sent_video_frames": 0
+          },
+          "needs_rejoin": false
+        }
+      ],
+      "repetition": 1,
+      "implementation": "before"
+    },
+    {
+      "mode": "standard",
+      "scenario": {
+        "name": "loss-jitter",
+        "loss_percent": 5,
+        "jitter_ms": 40,
+        "delay_ms": 20
+      },
+      "concurrent_calls": 1,
+      "connection_setup_ms": [
+        210.098091
+      ],
+      "rtt_ms": {
+        "count": 193,
+        "median": 149.6371,
+        "p95": 159.9478252,
+        "p99": 160.32840928000002
+      },
+      "frames": {
+        "sent": 200,
+        "received": 193,
+        "concealed": 5,
+        "unmatched": 7
+      },
+      "resources": {
+        "cpu_seconds": 0.9045379699999999,
+        "wall_seconds": 5.031630171994038,
+        "cpu_core_percent": 17.97703605154929,
+        "peak_tree_rss_bytes": 39354368,
+        "peak_parent_rss_bytes": 39354368,
+        "peak_worker_rss_bytes": 0,
+        "worker_voluntary_switches": 0,
+        "sample_interval_ms": 50,
+        "samples": 99
+      },
+      "engine_stats": [
+        {
+          "generation": 0,
+          "hardened": false,
+          "last_error": null,
+          "media": {
+            "concealed_frames": 25,
+            "connection_state": "Connected",
+            "dropped_frames": 5,
+            "received_frames": 243,
+            "received_video_frames": 0,
+            "sent_frames": 225,
+            "sent_video_frames": 0
+          },
+          "needs_rejoin": false
+        }
+      ],
+      "repetition": 1,
+      "implementation": "current"
+    },
+    {
+      "mode": "standard",
+      "scenario": {
+        "name": "loss-jitter",
+        "loss_percent": 5,
+        "jitter_ms": 40,
+        "delay_ms": 20
+      },
+      "concurrent_calls": 1,
+      "connection_setup_ms": [
+        210.864831
+      ],
+      "rtt_ms": {
+        "count": 193,
+        "median": 145.57229,
+        "p95": 155.44033299999998,
+        "p99": 155.73617956
+      },
+      "frames": {
+        "sent": 200,
+        "received": 193,
+        "concealed": 5,
+        "unmatched": 7
+      },
+      "resources": {
+        "cpu_seconds": 1.057266486,
+        "wall_seconds": 5.0233885130001,
+        "cpu_core_percent": 21.04687868087218,
+        "peak_tree_rss_bytes": 36884480,
+        "peak_parent_rss_bytes": 36884480,
+        "peak_worker_rss_bytes": 0,
+        "worker_voluntary_switches": 0,
+        "sample_interval_ms": 50,
+        "samples": 99
+      },
+      "engine_stats": [
+        {
+          "generation": 0,
+          "hardened": false,
+          "last_error": null,
+          "media": {
+            "concealed_frames": 25,
+            "connection_state": "Connected",
+            "dropped_frames": 5,
+            "received_frames": 243,
+            "received_video_frames": 0,
+            "sent_frames": 225,
+            "sent_video_frames": 0
+          },
+          "needs_rejoin": false
+        }
+      ],
+      "repetition": 1,
+      "implementation": "before"
+    }
+  ],
+  "optimized_revision": "02d9460a5a808dcf092416c6364862533da59810"
+}

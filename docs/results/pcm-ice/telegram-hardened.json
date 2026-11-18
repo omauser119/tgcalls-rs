@@ -1,0 +1,57 @@
+{
+  "schema": 4,
+  "scenario": "private Telegram group, one participant, synthesized 48 kHz stereo PCM upload",
+  "scope": "upload and transport setup only; no remote decode, RTT or general security claim",
+  "ntgcalls_baseline": "3.0.7",
+  "seconds_per_run": 6.0,
+  "transport_deadline_seconds": 12,
+  "results": [
+    {
+      "mode": "hardened",
+      "setup_ms": 988.3335660051671,
+      "transport_setup_ms": 784.8724110008334,
+      "submitted_frames": 300,
+      "submitted_blocks": 300,
+      "block_duration_ms": 20.0,
+      "submitted_pcm_bytes": 1152000,
+      "wall_seconds": 6.001851371998782,
+      "cpu_seconds": 0.5542636600000002,
+      "peak_tree_rss_bytes": 93417472,
+      "call_participants": 1,
+      "worker_voluntary_switches": 756,
+      "repetition": 0
+    },
+    {
+      "mode": "hardened",
+      "setup_ms": 1039.6893249999266,
+      "transport_setup_ms": 821.8728209976689,
+      "submitted_frames": 300,
+      "submitted_blocks": 300,
+      "block_duration_ms": 20.0,
+      "submitted_pcm_bytes": 1152000,
+      "wall_seconds": 6.000711871005478,
+      "cpu_seconds": 0.5613701160000002,
+      "peak_tree_rss_bytes": 93212672,
+      "call_participants": 1,
+      "worker_voluntary_switches": 766,
+      "repetition": 1
+    },
+    {
+      "mode": "hardened",
+      "setup_ms": 1031.223267003952,
+      "transport_setup_ms": 830.3266080038156,
+      "submitted_frames": 300,
+      "submitted_blocks": 300,
+      "block_duration_ms": 20.0,
+      "submitted_pcm_bytes": 1152000,
+      "wall_seconds": 6.0009843000007095,
+      "cpu_seconds": 0.5580452520000001,
+      "peak_tree_rss_bytes": 93147136,
+      "call_participants": 1,
+      "worker_voluntary_switches": 759,
+      "repetition": 2
+    }
+  ],
+  "process_isolation": true,
+  "optimized_revision": "02d9460a5a808dcf092416c6364862533da59810"
+}

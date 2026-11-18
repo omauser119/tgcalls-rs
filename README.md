@@ -7,24 +7,23 @@ Linux worker с seccomp. Личные звонки и видео реализо�
 Системные libopus, libx264 и FFmpeg не используются. Для Apple/Android добавлен
 host-driven клиент и платформенные границы изоляции: [MOBILE.md](docs/MOBILE.md).
 
-Это начальная реализация, **не полный и не сертифицированный по безопасности
-заменитель оригинального TgCalls**. Есть Telegram DataJSON/SDP bridge и примеры
-реального MTProto-подключения; live-совместимость с Telegram требует проверки
-авторизованной сессией. Локальные тесты не заменяют такую проверку.
+Состояние совместимости и проверенные сценарии описаны в
+[COMPATIBILITY.md](docs/COMPATIBILITY.md). Модель угроз и границы изоляции
+описаны в [SECURITY.md](docs/SECURITY.md).
 
 | Возможность | Состояние |
 | --- | --- |
 | Настоящий ICE/DTLS/SRTP loopback, RustyOpus encode/decode | Реализовано |
 | Ограниченный адаптивный jitter buffer, PLC, PCM 48 kHz stereo | Реализовано |
-| `phone.joinGroupCall` JSON, fingerprint/ICE, удалённые audio SSRC | Реализовано; live Telegram пока не проверен |
+| `phone.joinGroupCall` JSON, fingerprint/ICE, удалённые audio SSRC | В реальном Telegram проверена отправка PCM в групповом звонке с одним участником |
 | PyTGCalls 3.0.1: групповой `ExternalMedia.AUDIO` backend | Адаптер; не полный NTgCalls API |
 | Отдельный worker, SCM_RIGHTS, sealed memfd, seccomp, watchdog | Реализовано для Linux |
-| Автоматизированные RTT/CPU/RSS/loss/jitter сценарии | Harness подготовлен; бенчмарки не запускались |
+| Автоматизированные RTT/CPU/RSS/loss/jitter сценарии | Локальный loopback и отдельный стенд для группового звонка Telegram |
 | Личные звонки: DH, V2 encrypted signaling, двусторонние Opus/H.264 | Core и mobile request API, локальные тесты; live Telegram не проверен |
 | iOS Harden Mode | Wasm-интерпретатор без JIT, лимиты памяти/fuel, сброс после trap; функциональный медиатест |
 | macOS / Android Harden Mode | Swift XPC / Java isolated Service + SharedMemory; сборки в CI, проверка на устройствах требуется |
 | Групповое видео, simulcast, RTMP/MTProto broadcasts | Не реализованы |
-| AEC/NS/AGC, микрофон/динамик, resampling | Не реализованы; приложение подаёт готовый PCM |
+| AEC/NS/AGC, микрофон/динамик, resampling | Worker обрабатывает PCM через Sonora и `nnnoiseless`; в Apple SDK есть адаптер AVAudioEngine |
 
 ## Сборка
 

@@ -5,6 +5,20 @@ import Foundation
 /// Call tick every 10 ms while a call is active. Restart negotiation after errors.
 public actor TgCallsClient {
     public enum Isolation: Sendable, Equatable { case standard, hardened }
+    public static let hardenModePreference = "CallsHardenMode"
+
+    public static func configured(bundle: Bundle = .main, defaults: UserDefaults = .standard,
+                                  macosService: String? = nil) throws -> TgCallsClient {
+        let mode: Isolation = defaults.bool(forKey: hardenModePreference) ? .hardened : .standard
+        #if os(iOS)
+        let module = mode == .hardened
+            ? try bundle.url(forResource: "tgcalls-worker", withExtension: "wasm").map { try Data(contentsOf: $0) }
+            : nil
+        return try TgCallsClient(isolation: mode, wasmModule: module)
+        #else
+        return try TgCallsClient(isolation: mode, macosService: macosService)
+        #endif
+    }
     private let local: LocalWorker?
     #if os(macOS)
     private let xpc: XpcWorker?

@@ -31,8 +31,9 @@ RLIMIT_NOFILE=256 и parent-death SIGKILL. Он наследует uid роди�
 контейнер или защиту от kernel exploits.
 
 Управляющий сокет создаётся через socketpair без filesystem pathname.
-Bootstrap принимает ровно 3 SCM_RIGHTS descriptors с CLOEXEC, закрывая их при
-ошибке. IPC frames ограничены 64 KiB до выделения памяти; от worker не принимаются
+Bootstrap принимает ровно пять SCM_RIGHTS descriptors с CLOEXEC: sealed memfd,
+два UDP-сокета и два eventfd для уведомлений о PCM. При ошибке дескрипторы
+закрываются. IPC frames ограничены 64 KiB до выделения памяти; от worker не принимаются
 произвольные пути или команды. Helper выбирает доверенное приложение по явному
 абсолютному пути; защита от подмены этого бинарника — обязанность установки.
 

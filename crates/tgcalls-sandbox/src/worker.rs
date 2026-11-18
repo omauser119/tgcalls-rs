@@ -9,7 +9,7 @@ use std::{
     net::UdpSocket, os::fd::FromRawFd, os::unix::net::UnixStream, sync::Arc, time::Duration,
 };
 use tgcalls_core::session::Session;
-use tokio::sync::Mutex;
+use tokio::sync::watch;
 
 pub fn run() -> Result<()> {
     // fd 3 is established by the supervisor using dup2 before exec. There is no path-based socket.
@@ -20,6 +20,10 @@ pub fn run() -> Result<()> {
     let shared = Arc::new(SharedAudio::attach(
         fds.next().ok_or_else(|| anyhow!("missing memfd"))?,
     )?);
+    let audio_ready = fds.next().ok_or_else(|| anyhow!("missing audio eventfd"))?;
+    let output_ready = fds
+        .next()
+        .ok_or_else(|| anyhow!("missing output eventfd"))?;
     let sockets: Vec<UdpSocket> = fds.map(UdpSocket::from).collect();
     if sockets.len() != 2 {
         bail!("missing UDP descriptors");
@@ -40,52 +44,70 @@ pub fn run() -> Result<()> {
         .build()?;
     runtime.block_on(async move {
         let mut control = tokio::net::UnixStream::from_std(control)?;
+        let audio_ready = ipc::AudioSignal::attach(audio_ready)?;
+        let output_ready = ipc::AudioSignal::attach(output_ready)?;
         let mut sockets = Some(sockets);
-        let session: Arc<Mutex<Option<Arc<Session>>>> = Arc::new(Mutex::new(None));
+        let (session, mut media_session) = watch::channel::<Option<Arc<Session>>>(None);
         // No external SDP, JSON, RTP or Opus input is processed before this point.
         policy::install()?;
         policy::verify_filesystem_denied()?;
         ipc::write_frame(&mut control, &Response::success()).await?;
-        let media_session = session.clone();
+        let mut output_session = media_session.clone();
         let input_audio = shared.clone();
         tokio::spawn(async move {
-            let mut timer = tokio::time::interval(Duration::from_millis(1));
+            let Some(current) = media_session
+                .wait_for(Option::is_some)
+                .await
+                .ok()
+                .and_then(|current| current.clone())
+            else {
+                return;
+            };
             loop {
-                timer.tick().await;
-                let current = media_session.lock().await.clone();
-                let Some(current) = current else {
-                    continue;
-                };
-                let frame = match input_audio.pop(false) {
-                    Ok(Some(frame)) => frame,
-                    Ok(None) => continue,
-                    Err(_) => std::process::exit(70),
-                };
-                // A codec panic destroys the worker, rather than reusing possibly corrupted state.
-                if !matches!(
-                    std::panic::AssertUnwindSafe(current.send_pcm(&frame.pcm))
-                        .catch_unwind()
-                        .await,
-                    Ok(Ok(_))
-                ) {
+                if audio_ready.wait().await.is_err() {
                     std::process::exit(70);
+                }
+                let mut processed = 0;
+                loop {
+                    let frame = match input_audio.pop(false) {
+                        Ok(Some(frame)) => frame,
+                        Ok(None) => break,
+                        Err(_) => std::process::exit(70),
+                    };
+                    if !matches!(
+                        std::panic::AssertUnwindSafe(current.send_pcm(&frame.pcm))
+                            .catch_unwind()
+                            .await,
+                        Ok(Ok(_))
+                    ) {
+                        std::process::exit(70);
+                    }
+                    processed += 1;
+                    if processed % 32 == 0 {
+                        tokio::task::yield_now().await;
+                    }
                 }
             }
         });
-        let output_session = session.clone();
         tokio::spawn(async move {
+            let Some(current) = output_session
+                .wait_for(Option::is_some)
+                .await
+                .ok()
+                .and_then(|current| current.clone())
+            else {
+                return;
+            };
             loop {
-                let current = output_session.lock().await.clone();
-                if let Some(current) = current {
-                    match current.receive(Duration::from_millis(100)).await {
-                        Ok(frame) => {
-                            let _ = shared.push(true, &frame);
-                        } // bounded overflow drops a frame
-                        Err(tgcalls_core::Error::Timeout) => {}
-                        Err(_) => std::process::exit(70),
+                match current.receive(Duration::from_secs(1)).await {
+                    Ok(frame) => {
+                        // A full ring drops this frame without issuing a wake-up.
+                        if shared.push(true, &frame).is_ok() && output_ready.signal().is_err() {
+                            std::process::exit(70);
+                        }
                     }
-                } else {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Err(tgcalls_core::Error::Timeout) => {}
+                    Err(_) => std::process::exit(70),
                 }
             }
         });
@@ -95,7 +117,7 @@ pub fn run() -> Result<()> {
             let result = std::panic::AssertUnwindSafe(async {
                 let mut response = Response::success();
                 if let Request::Configure { config, bind_ip } = request {
-                    if session.lock().await.is_some() {
+                    if session.borrow().is_some() {
                         bail!("worker already configured");
                     }
                     let current = match config {
@@ -106,11 +128,10 @@ pub fn run() -> Result<()> {
                             Session::group(&bind_ip, sockets.take(), ssrc).await?
                         }
                     };
-                    *session.lock().await = Some(Arc::new(current));
+                    session.send_replace(Some(Arc::new(current)));
                 } else {
                     let current = session
-                        .lock()
-                        .await
+                        .borrow()
                         .clone()
                         .ok_or_else(|| anyhow!("worker not configured"))?;
                     match request {

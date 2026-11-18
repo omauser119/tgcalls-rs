@@ -1,8 +1,10 @@
 //! Bounded audio engine. Telegram authentication remains with the caller's MTProto client.
 #![forbid(unsafe_code)]
 
+pub mod audio_processing;
 pub mod auth;
 pub mod codec;
+mod ice_io;
 pub mod jitter;
 pub mod negotiation;
 pub mod packet;

@@ -20,15 +20,23 @@ pub struct IceServer {
     pub turn: bool,
 }
 impl IceServer {
-    pub fn rtc(&self) -> Result<RTCIceServer> {
+    pub(crate) fn address(&self) -> Result<std::net::SocketAddr> {
         let ip: std::net::IpAddr = self
             .host
             .parse()
             .map_err(|_| Error::Invalid("ICE server must be a numeric address".into()))?;
-        if self.port == 0 || self.username.len() > 256 || self.password.len() > 256 {
+        if self.port == 0
+            || ip.is_unspecified()
+            || ip.is_multicast()
+            || self.username.len() > 256
+            || self.password.len() > 256
+        {
             return Err(Error::Invalid("invalid ICE server".into()));
         }
-        let address = std::net::SocketAddr::new(ip, self.port);
+        Ok(std::net::SocketAddr::new(ip, self.port))
+    }
+    pub fn rtc(&self) -> Result<RTCIceServer> {
+        let address = self.address()?;
         Ok(RTCIceServer {
             urls: vec![format!(
                 "{}:{address}",

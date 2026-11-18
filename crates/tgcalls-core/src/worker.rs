@@ -1,9 +1,10 @@
 //! Bounded request protocol shared by native mobile services and the iOS Wasm module.
 use crate::{
     AudioFrame, Error, Result,
+    audio_processing::{VoiceOptions, VoiceProcessor},
     auth::{AuthKey, KeyExchange},
-    negotiation::{MediaContent, contents_from_sdp, setup_from_sdp, synthesize_answer},
-    sansio::{Datagram, Engine},
+    negotiation::{IceServer, MediaContent, contents_from_sdp, setup_from_sdp, synthesize_answer},
+    sansio::{Datagram, Engine, MediaState},
     signaling::Signaling,
     video::{VideoConfig, VideoFrame},
 };
@@ -22,6 +23,10 @@ pub enum Request {
         local: String,
         ssrc: u32,
         video: Option<VideoConfig>,
+        #[serde(default)]
+        ice_servers: Vec<IceServer>,
+        #[serde(default)]
+        relay_only: bool,
     },
     Offer,
     Answer {
@@ -37,6 +42,23 @@ pub enum Request {
     Tick,
     SendAudio {
         pcm: Vec<u8>,
+    },
+    ConfigureAudio {
+        capture_rate: u32,
+        capture_channels: u16,
+        render_rate: u32,
+        render_channels: u16,
+        options: VoiceOptions,
+    },
+    RenderAudio {
+        pcm: Vec<u8>,
+    },
+    MediaState {
+        state: MediaState,
+    },
+    CaptureAudio {
+        pcm: Vec<u8>,
+        delay_ms: u16,
     },
     SendVideo {
         i420: Vec<u8>,
@@ -54,6 +76,9 @@ pub enum Request {
     },
     StartPersonal {
         outgoing: bool,
+    },
+    RebindPersonal {
+        local: String,
     },
     Signaling {
         packet: Vec<u8>,
@@ -105,6 +130,8 @@ struct Personal {
     candidates: Vec<String>,
     early: VecDeque<Value>,
     signals: VecDeque<Vec<u8>>,
+    waiting_for_restart: bool,
+    last_restart: Option<Instant>,
 }
 #[derive(Default)]
 pub struct Worker {
@@ -114,6 +141,8 @@ pub struct Worker {
     personal: Option<Personal>,
     offer: Option<String>,
     ssrc: u32,
+    voice: Option<VoiceProcessor>,
+    captured: Option<Vec<u8>>,
 }
 impl Worker {
     pub fn execute(&mut self, bytes: &[u8]) -> Vec<u8> {
@@ -145,16 +174,24 @@ impl Worker {
         let mut response = Response::success();
         let now = Instant::now();
         match request {
-            Request::New { local, ssrc, video } => {
+            Request::New {
+                local,
+                ssrc,
+                video,
+                ice_servers,
+                relay_only,
+            } => {
                 if self.engine.is_some() || ssrc == 0 {
                     return Err(Error::Invalid("already initialized or invalid SSRC".into()));
                 }
-                self.engine = Some(Engine::new(
+                self.engine = Some(Engine::with_ice(
                     local
                         .parse()
                         .map_err(|_| Error::Invalid("local address".into()))?,
                     ssrc,
                     video,
+                    ice_servers,
+                    relay_only,
                     now,
                 )?);
                 self.ssrc = ssrc;
@@ -174,10 +211,46 @@ impl Worker {
             )?,
             Request::Tick => {
                 self.engine()?.tick(now)?;
-                response.payload = json!({"connection_state":self.engine()?.connection_state});
+                let engine = self.engine()?;
+                response.payload = json!({"connection_state":engine.connection_state, "remote_media":engine.remote_media_state});
             }
+            Request::MediaState { state } => self.engine()?.set_media_state(state)?,
             Request::SendAudio { pcm } => {
                 response.payload = json!(self.engine()?.send_audio(&pcm, now)?)
+            }
+            Request::ConfigureAudio {
+                capture_rate,
+                capture_channels,
+                render_rate,
+                render_channels,
+                options,
+            } => {
+                self.voice = Some(VoiceProcessor::new(
+                    capture_rate,
+                    capture_channels,
+                    render_rate,
+                    render_channels,
+                    options,
+                )?);
+                self.captured = None;
+            }
+            Request::RenderAudio { pcm } => self
+                .voice
+                .as_mut()
+                .ok_or_else(no_audio_device)?
+                .render(&pcm)?,
+            Request::CaptureAudio { pcm, delay_ms } => {
+                let block = self
+                    .voice
+                    .as_mut()
+                    .ok_or_else(no_audio_device)?
+                    .capture(&pcm, delay_ms)?;
+                if let Some(mut frame) = self.captured.take() {
+                    frame.extend(block);
+                    response.payload = json!(self.engine()?.send_audio(&frame, now)?);
+                } else {
+                    self.captured = Some(block);
+                }
             }
             Request::SendVideo { i420 } => self.engine()?.send_video(&i420, now)?,
             Request::Drain => {}
@@ -231,6 +304,8 @@ impl Worker {
                     candidates: vec![],
                     early: VecDeque::new(),
                     signals: VecDeque::new(),
+                    waiting_for_restart: false,
+                    last_restart: None,
                 };
                 queue(&mut personal, setup_from_sdp(&offer, outgoing)?)?;
                 let candidates:Vec<_>=offer.lines().filter_map(|l|l.strip_prefix("a=candidate:")).map(|c|json!({"sdpString":format!("candidate:{c}"),"sdpMid":"0","sdpMLineIndex":0})).collect();
@@ -243,6 +318,18 @@ impl Worker {
                 }
                 self.personal = Some(personal);
             }
+            Request::RebindPersonal { local } => {
+                let local = local
+                    .parse()
+                    .map_err(|_| Error::Invalid("invalid new socket address".into()))?;
+                let mut state = self
+                    .personal
+                    .take()
+                    .ok_or_else(|| Error::Invalid("personal call not initialized".into()))?;
+                let result = restart(self.engine()?, &mut state, local, now, true);
+                self.personal = Some(state);
+                result?;
+            }
             Request::Signaling { packet } => {
                 let mut state = self
                     .personal
@@ -253,10 +340,18 @@ impl Worker {
                 result?;
             }
             Request::PollSignaling => {
+                let candidates: Vec<_> = self
+                    .engine()?
+                    .gathered_candidates()
+                    .map(|candidate| json!({"sdpString":candidate,"sdpMid":"0","sdpMLineIndex":0}))
+                    .collect();
                 let state = self
                     .personal
                     .as_mut()
                     .ok_or_else(|| Error::Invalid("personal call not initialized".into()))?;
+                if !candidates.is_empty() {
+                    queue(state, json!({"@type":"Candidates","candidates":candidates}))?;
+                }
                 if let Some(packet) = state.cipher.service(now)? {
                     state.signals.push_back(packet);
                 }
@@ -279,12 +374,47 @@ impl Worker {
             }
         }
         if let Some(engine) = &mut self.engine {
-            response.datagrams = engine.outgoing();
+            response.datagrams = engine.outgoing()?;
             response.audio = engine.audio.drain(..).collect();
             response.video = engine.video.drain(..).collect();
         }
         Ok(response)
     }
+}
+
+fn no_audio_device() -> Error {
+    Error::Invalid("configure the audio device first".into())
+}
+
+fn restart(
+    engine: &mut Engine,
+    state: &mut Personal,
+    local: std::net::SocketAddr,
+    now: Instant,
+    initiating: bool,
+) -> Result<()> {
+    if state.pending
+        || state.setup.is_none()
+        || state.accepted.is_empty()
+        || state.remote.is_empty()
+    {
+        return Err(Error::Invalid(
+            "finish initial negotiation before restarting ICE".into(),
+        ));
+    }
+    if state
+        .last_restart
+        .is_some_and(|last| now.saturating_duration_since(last) < std::time::Duration::from_secs(1))
+    {
+        return Err(Error::Invalid("ICE restart rate exceeded".into()));
+    }
+    state.offer = engine.restart_offer(local, now)?;
+    state.pending = true;
+    complete(engine, state)?;
+    queue(state, setup_from_sdp(&state.offer, state.outgoing)?)?;
+    state.last_restart = Some(now);
+    state.waiting_for_restart = initiating;
+    Ok(())
 }
 
 fn queue(state: &mut Personal, message: Value) -> Result<()> {
@@ -336,11 +466,28 @@ fn receive_personal(engine: &mut Engine, state: &mut Personal, packet: &[u8]) ->
     while let Some(message) = messages.pop_front() {
         match message["@type"].as_str() {
             Some("InitialSetup") => {
-                if state.setup.is_some() {
-                    return Err(Error::Invalid("ICE replacement requires new call".into()));
+                if let Some(previous) = &state.setup {
+                    if previous["fingerprints"] != message["fingerprints"] {
+                        return Err(Error::Invalid(
+                            "DTLS fingerprint changed during ICE restart".into(),
+                        ));
+                    }
+                    if previous["ufrag"] == message["ufrag"] && previous["pwd"] == message["pwd"] {
+                        continue;
+                    }
+                    state.setup = Some(message);
+                    if state.waiting_for_restart {
+                        state.offer = engine.offer()?;
+                        state.pending = true;
+                        complete(engine, state)?;
+                        state.waiting_for_restart = false;
+                    } else {
+                        restart(engine, state, engine.local_addr(), Instant::now(), false)?;
+                    }
+                } else {
+                    state.setup = Some(message);
+                    messages.extend(state.early.drain(..));
                 }
-                state.setup = Some(message);
-                messages.extend(state.early.drain(..));
             }
             Some("Candidates") => {
                 let candidates = message["candidates"]

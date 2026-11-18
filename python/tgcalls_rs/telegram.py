@@ -4,11 +4,26 @@ from __future__ import annotations
 import asyncio
 import json
 
-from .client import Call
+async def check_group_sources(client, call, sources):
+    from telethon import functions
+
+    class CheckGroupCall(functions.phone.CheckGroupCallRequest):
+        @staticmethod
+        def read_result(reader):
+            if reader.read_int(signed=False) != 0x1CB5C415:
+                raise ValueError("invalid source vector constructor")
+            count = reader.read_int()
+            if not 0 <= count <= len(sources):
+                raise ValueError("invalid source vector length")
+            return [reader.read_int() for _ in range(count)]
+
+    return await client(CheckGroupCall(call=call, sources=sources))
 
 
 class TelegramGroupCall:
     def __init__(self, client, chat, **engine_options):
+        from .client import Call
+
         self.client = client
         self.chat = chat
         self.audio = Call(**engine_options)
@@ -70,7 +85,6 @@ class TelegramGroupCall:
         await self.audio.set_sources(sources)
 
     async def _maintain(self) -> None:
-        from telethon import functions
         try:
             tick = 0
             while not self._closing:
@@ -81,7 +95,7 @@ class TelegramGroupCall:
                 # Telegram expects liveness queries; participant SSRCs can change mid-call.
                 tick += 1
                 if self._ssrc is not None and tick % 5 == 0:
-                    await self.client(functions.phone.CheckGroupCallRequest(call=self._call, sources=[self._ssrc]))
+                    await check_group_sources(self.client, self._call, [self._ssrc])
                     await self.refresh_participants()
         except asyncio.CancelledError:
             raise

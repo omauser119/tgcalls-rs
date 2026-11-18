@@ -11,11 +11,10 @@ SHA-256 DTLS fingerprint и SSRC → Telegram `phone.joinGroupCall(params=DataJS
 * [Telegram GroupInstanceReferenceImpl.cpp](https://github.com/TelegramMessenger/tgcalls/blob/development/tgcalls/group/GroupInstanceReferenceImpl.cpp)
 * [PyTGCalls connect_call.py](https://github.com/pytgcalls/pytgcalls/blob/master/pytgcalls/methods/internal/connect_call.py)
 
-Это не доказательство live-совместимости. В репозитории нет Telegram credentials,
-а локальный WebRTC peer и synthetic DataJSON fixture не являются Telegram SFU.
-Перед заявлением production compatibility нужен реальный групповой звонок в
-обоих режимах, двусторонний звук с официальными клиентами, join/leave, смена
-участников, rejoin после worker crash и разные сети.
+В приватной обычной группе с единственным участником проверены вход в живой
+звонок, отправка PCM и сохранение SSRC в Telegram. Двусторонний звук с
+официальными клиентами, смена участников и rejoin после сбоя в разных сетях
+остаются отдельными сценариями проверки.
 
 NTgCalls-compatible subset: `create_call`, `connect`, `set_stream_sources`
 (ExternalMedia.AUDIO only), `send_external_frame`, `stop`, `calls`, `get_state`,
@@ -29,8 +28,10 @@ encrypted signaling (8.0.0/9.0.0), однонаправленные медиак
 Opus и Baseline H.264 на Remade-With-Rust. Есть локальные тесты полного обмена
 ключами/сигналингом и двустороннего медиатракта. Core API и mobile request API
 пока не подключены к личным звонкам/видео в старом Python NTgCalls-адаптере.
-Live-совместимость с официальными Telegram-клиентами не подтверждена; текущий
-mobile transport без STUN gathering/TURN требует достижимых host candidates.
+В Python отдельный `TelegramPersonalCall` связывает Worker с Telethon. Мобильный
+транспорт поддерживает стандартные UDP STUN и TURN. Хост передаёт локальный адрес
+нового сокета для ICE restart. Нужна проверка перехода Wi-Fi/LTE и личных звонков
+с официальным клиентом.
 V3 signaling (версии 12/13), Telegram reflector/MTProto media, групповое видео,
 simulcast, conference E2EE, broadcast transport и device/file/shell media sources
 не реализованы. DTLS/SRTP группового звонка не следует называть Telegram E2EE.

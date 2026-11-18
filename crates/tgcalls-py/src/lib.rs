@@ -27,6 +27,29 @@ macro_rules! ffi_guard {
     }};
 }
 
+#[pyclass(frozen)]
+struct PersonalWorker(Mutex<tgcalls_core::worker::Worker>);
+
+#[pymethods]
+impl PersonalWorker {
+    #[new]
+    fn new() -> PyResult<Self> {
+        ffi_guard!(Ok(Self(Mutex::new(Default::default()))))
+    }
+
+    fn request(&self, py: Python<'_>, input: Vec<u8>) -> PyResult<Py<PyBytes>> {
+        ffi_guard!({
+            let reply = py.detach(|| {
+                self.0
+                    .lock()
+                    .map_err(|_| PyRuntimeError::new_err("personal call worker failed"))
+                    .map(|mut worker| worker.execute(&input))
+            })?;
+            Ok(PyBytes::new(py, &reply).unbind())
+        })
+    }
+}
+
 enum Backend {
     Standard(Arc<Session>),
     Hardened(Arc<Sandbox>),
@@ -361,6 +384,7 @@ impl Engine {
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     ffi_guard!({
         module.add_class::<Engine>()?;
+        module.add_class::<PersonalWorker>()?;
         module.add("PCM_BYTES", tgcalls_core::PCM_BYTES)?;
         Ok(())
     })

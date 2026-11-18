@@ -70,20 +70,12 @@ impl<T> JitterBuffer<T> {
 
     /// None before prebuffering; Some(None) requests concealment for a missing sequence.
     pub fn pop(&mut self, now: Instant) -> Option<Option<T>> {
-        if now.saturating_duration_since(self.start?)
-            < Duration::from_millis(u64::from(self.target_ms))
-        {
+        if now < self.ready_at()? {
             return None;
         }
         let mut next = self.next?;
-        if let Some(last_pop) = self.last_pop {
+        if self.last_pop.is_some() {
             if self.target_ms > self.applied_delay_ms {
-                let needed = self.frame_ms + self.target_ms - self.applied_delay_ms;
-                if now.saturating_duration_since(last_pop)
-                    < Duration::from_millis(u64::from(needed))
-                {
-                    return None;
-                }
                 self.applied_delay_ms = self.target_ms;
             } else if self.applied_delay_ms > self.target_ms {
                 // Shrink accumulated delay by bounded frame discard. A full WSOLA/time-
@@ -111,6 +103,17 @@ impl<T> JitterBuffer<T> {
         self.next = Some(next + 1);
         self.last_pop = Some(now);
         Some(self.packets.remove(&next))
+    }
+
+    pub(crate) fn ready_at(&self) -> Option<Instant> {
+        let prebuffered = self.start? + Duration::from_millis(u64::from(self.target_ms));
+        match self.last_pop {
+            Some(last) if self.target_ms > self.applied_delay_ms => {
+                let needed = self.frame_ms + self.target_ms - self.applied_delay_ms;
+                Some(prebuffered.max(last + Duration::from_millis(u64::from(needed))))
+            }
+            _ => Some(prebuffered),
+        }
     }
 
     pub fn target_delay_ms(&self) -> u32 {

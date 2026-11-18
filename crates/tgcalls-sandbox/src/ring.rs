@@ -1,5 +1,5 @@
 //! Two fixed-size SPSC queues in a sealed memfd. All shared fields are atomic,
-//! including payload bytes: a compromised writer cannot cause a Rust data race.
+//! including payload words: a compromised writer cannot cause a Rust data race.
 use anyhow::{Context, Result, bail};
 use memmap2::{MmapMut, MmapOptions};
 use nix::fcntl::{FcntlArg, SealFlag, fcntl};
@@ -7,7 +7,7 @@ use nix::sys::memfd::{MFdFlags, memfd_create};
 use std::fs::File;
 use std::mem::size_of;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tgcalls_core::AudioFrame;
 
 const CAPACITY: usize = 32;
@@ -21,7 +21,7 @@ struct Slot {
     timestamp: AtomicU32,
     concealed: AtomicU32,
     target_ms: AtomicU32,
-    data: [AtomicU8; PAYLOAD],
+    data: [AtomicU64; PAYLOAD / 8],
 }
 #[repr(C, align(64))]
 struct Queue {
@@ -108,8 +108,14 @@ impl SharedAudio {
             bail!("audio queue full");
         }
         let slot = &queue.slots[(head % CAPACITY as u64) as usize];
-        for (destination, source) in slot.data.iter().zip(&frame.pcm) {
-            destination.store(*source, Ordering::Relaxed);
+        let (words, remaining) = frame.pcm.as_chunks::<8>();
+        for (destination, source) in slot.data.iter().zip(words) {
+            destination.store(u64::from_ne_bytes(*source), Ordering::Relaxed);
+        }
+        if !remaining.is_empty() {
+            let mut last = [0; 8];
+            last[..remaining.len()].copy_from_slice(remaining);
+            slot.data[words.len()].store(u64::from_ne_bytes(last), Ordering::Relaxed);
         }
         slot.length.store(frame.pcm.len() as u32, Ordering::Relaxed);
         slot.ssrc.store(frame.ssrc, Ordering::Relaxed);
@@ -142,11 +148,17 @@ impl SharedAudio {
         if length > PAYLOAD {
             bail!("corrupt shared audio length");
         }
+        let mut pcm = vec![0; length];
+        let (words, remaining) = pcm.as_chunks_mut::<8>();
+        for (destination, source) in words.iter_mut().zip(&slot.data) {
+            *destination = source.load(Ordering::Relaxed).to_ne_bytes();
+        }
+        if !remaining.is_empty() {
+            let last = slot.data[words.len()].load(Ordering::Relaxed).to_ne_bytes();
+            remaining.copy_from_slice(&last[..remaining.len()]);
+        }
         let frame = AudioFrame {
-            pcm: slot.data[..length]
-                .iter()
-                .map(|b| b.load(Ordering::Relaxed))
-                .collect(),
+            pcm,
             ssrc: slot.ssrc.load(Ordering::Relaxed),
             sequence: slot.sequence.load(Ordering::Relaxed) as u16,
             timestamp: slot.timestamp.load(Ordering::Relaxed),

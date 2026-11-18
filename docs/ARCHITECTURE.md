@@ -14,7 +14,7 @@
        ├── standard: Session → webrtc-rs / Tokio → RustyOpus
        └── hardened: Supervisor
             ├── приватная UnixStream::pair: JSON control, max 64 KiB
-            ├── SCM_RIGHTS: sealed memfd + 2 prebound UDP sockets
+            ├── SCM_RIGHTS: sealed memfd, 2 prebound UDP sockets, 2 eventfd
             ├── memfd: input/output rings, 32 slots × 23040 bytes
             └── exec worker → single-thread Tokio → seccomp TSYNC → Session
 ```
@@ -23,6 +23,11 @@ PCM идёт через shared memory, без сериализации ауди�
 между адресными пространствами ядром. Это **не zero-overhead и не end-to-end
 zero-copy**: остаются копии Python/Rust, атомарные копии в ring и работа кодека.
 Величину накладных расходов должен определить benchmark harness.
+
+Каждый eventfd будит читателя только после публикации кадра. Уведомления могут
+объединяться. Буфер задаёт порядок и число кадров, поэтому счётчик eventfd не
+используется для индексации или выделения памяти. Выпуск аудио планируется по
+длительности декодированного кадра и текущей задержке jitter buffer.
 
 Все разделяемые поля, включая payload, атомарные. Повреждённые счётчики и длины
 проверяются до индексации. memfd запечатан от изменения размера, чтобы другая

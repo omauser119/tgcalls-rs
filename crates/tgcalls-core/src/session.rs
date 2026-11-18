@@ -203,13 +203,16 @@ async fn receive_track(
 ) -> Result<()> {
     let mut decoder = codec::Decoder::new()?;
     let mut jitter = JitterBuffer::<Packet>::default();
-    let mut timer = tokio::time::interval(Duration::from_millis(20));
-    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut next_playout = Instant::now();
     let mut last: Option<(u32, u16, u32, u32)> = None;
     let mut delayed: Vec<(Instant, Packet)> = Vec::new();
     let mut rng = impairment.seed.max(1);
     loop {
+        let deadline = if echo.is_some() {
+            delayed.iter().map(|(at, _)| *at).min()
+        } else {
+            jitter.ready_at().map(|ready| ready.max(next_playout))
+        };
         tokio::select! {
             event = track.poll() => match event {
                 Some(TrackRemoteEvent::OnRtpPacket(mut packet)) => {
@@ -233,7 +236,11 @@ async fn receive_track(
                 Some(_) => {},
                 None => break,
             },
-            _ = timer.tick() => {
+            Some(scheduled) = async {
+                let Some(at) = deadline else { return std::future::pending().await; };
+                tokio::time::sleep_until(at.into()).await;
+                Some(at)
+            } => {
                 let now = Instant::now();
                 if let Some(output) = &echo {
                     let mut index = 0;
@@ -245,7 +252,6 @@ async fn receive_track(
                     }
                     continue;
                 }
-                if now < next_playout { continue; }
                 if let Some(packet) = jitter.pop(now) {
                     let (ssrc, sequence, timestamp, concealed, pcm) = if let Some(packet) = packet {
                         let pcm = decoder.decode(&packet.payload)?;
@@ -254,7 +260,10 @@ async fn receive_track(
                         (ssrc, seq.wrapping_add(1), ts.wrapping_add(samples), true, decoder.decode(&[])?)
                     } else { continue; };
                     let duration = Duration::from_secs_f64(pcm.len() as f64 / (crate::SAMPLE_RATE * crate::CHANNELS * 2) as f64);
-                    next_playout = now + duration.saturating_sub(Duration::from_millis(2));
+                    next_playout = scheduled + duration;
+                    if next_playout <= now {
+                        next_playout = now + duration;
+                    }
                     let samples = pcm.len() / (crate::CHANNELS * 2);
                     jitter.set_frame_samples(samples);
                     last = Some((ssrc, sequence, timestamp, samples as u32));
@@ -751,24 +760,8 @@ impl Session {
 
     pub async fn send_pcm(&self, pcm: &[u8]) -> Result<u32> {
         let mut state = self.send_state.lock().await;
-        let packet = self.encoder.lock().await.encode(pcm)?;
+        let (packet, level) = self.encoder.lock().await.encode_with_level(pcm)?;
         let (sequence_number, timestamp) = *state;
-        let rms = (pcm
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|s| {
-                let x = f64::from(i16::from_le_bytes(*s)) / 32768.0;
-                x * x
-            })
-            .sum::<f64>()
-            / (pcm.len() / 2) as f64)
-            .sqrt();
-        let level = if rms <= 0.0 {
-            127
-        } else {
-            (-20.0 * rms.log10()).clamp(0.0, 127.0) as u8
-        };
         self.primary
             .output
             .write_rtp_with_extensions(

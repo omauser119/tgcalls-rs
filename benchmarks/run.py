@@ -44,11 +44,15 @@ def percentile(values, p):
 
 
 class ProcessTreeSampler:
-    def __init__(self):
+    def __init__(self, worker_pids=()):
         import psutil
         self.psutil = psutil
         self.parent = psutil.Process()
+        # The engine reports the helper PIDs. Polling children(recursive=True)
+        # scans every system process and can dominate the measured CPU time.
+        self.workers = [psutil.Process(pid) for pid in worker_pids if pid is not None]
         self.previous = {}
+        self.initial_switches = None
         self.cpu_seconds = 0.0
         self.peak_rss = 0
         self.peak_parent_rss = 0
@@ -56,7 +60,7 @@ class ProcessTreeSampler:
         self.samples = 0
 
     def sample(self, *, baseline=False):
-        processes = [self.parent, *self.parent.children(recursive=True)]
+        processes = [self.parent, *self.workers]
         parent_rss = worker_rss = 0
         for process in processes:
             try:
@@ -77,6 +81,23 @@ class ProcessTreeSampler:
         self.peak_worker_rss = max(self.peak_worker_rss, worker_rss)
         self.peak_rss = max(self.peak_rss, parent_rss + worker_rss)
         self.samples += 1
+        if baseline:
+            self.initial_switches = self.worker_switches()
+
+    def worker_switches(self):
+        switches = 0
+        for worker in self.workers:
+            try:
+                switches += worker.num_ctx_switches().voluntary
+            except (self.psutil.NoSuchProcess, self.psutil.AccessDenied):
+                return None
+        return switches
+
+    def worker_switch_delta(self):
+        switches = self.worker_switches()
+        if switches is None or self.initial_switches is None:
+            return None
+        return switches - self.initial_switches
 
     async def run(self, finished):
         self.sample(baseline=True)
@@ -151,6 +172,7 @@ async def one_case(mode, scenario, args):
     calls = []
     setup = []
     before_generation = []
+    worker_pids = []
     try:
         for _ in range(args.calls):
             call = Call(hardened=mode == "hardened", helper_path=args.helper)
@@ -160,8 +182,10 @@ async def one_case(mode, scenario, args):
                                       jitter_ms=scenario.jitter_ms,
                                       delay_ms=scenario.delay_ms, seed=args.seed)
             setup.append((time.perf_counter_ns() - begin) / 1e6)
-            before_generation.append((await call.stats())["generation"])
-        sampler = ProcessTreeSampler()
+            stats = await call.stats()
+            before_generation.append(stats["generation"])
+            worker_pids.append(stats["worker_pid"])
+        sampler = ProcessTreeSampler(worker_pids)
         finished = asyncio.Event()
         sampling = asyncio.create_task(sampler.run(finished))
         start = time.perf_counter()
@@ -185,6 +209,7 @@ async def one_case(mode, scenario, args):
                                    peak_tree_rss_bytes=sampler.peak_rss,
                                    peak_parent_rss_bytes=sampler.peak_parent_rss,
                                    peak_worker_rss_bytes=sampler.peak_worker_rss,
+                                   worker_voluntary_switches=sampler.worker_switch_delta(),
                                    sample_interval_ms=50, samples=sampler.samples),
                     engine_stats=stats)
     finally:

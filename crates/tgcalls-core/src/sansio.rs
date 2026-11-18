@@ -2,6 +2,8 @@
 //! Only encrypted datagrams and an explicit clock cross the network capability boundary.
 use crate::{
     AudioFrame, Error, Result, codec,
+    ice_io::{IceIo, datagram},
+    negotiation::IceServer,
     video::{H264_FMTP, H264Assembler, VideoConfig, VideoDecoder, VideoEncoder, VideoFrame},
 };
 use bytes::{Bytes, BytesMut};
@@ -20,7 +22,7 @@ use rtc::{
         RtpCodecKind,
     },
     sansio::Protocol,
-    shared::{TaggedBytesMut, TransportContext, TransportProtocol},
+    shared::TaggedBytesMut,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -33,6 +35,25 @@ use std::{
 pub struct Datagram {
     pub peer: String,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoState {
+    #[default]
+    Inactive,
+    Suspended,
+    Active,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MediaState {
+    pub muted: bool,
+    pub low_battery: bool,
+    pub video_state: VideoState,
+    pub screencast_state: VideoState,
+    pub video_rotation: u16,
 }
 struct AudioRx {
     decoder: codec::Decoder,
@@ -60,17 +81,67 @@ pub struct Engine {
     pub audio: VecDeque<AudioFrame>,
     pub video: VecDeque<VideoFrame>,
     pub connection_state: String,
+    ice_io: IceIo,
+    wire: VecDeque<TaggedBytesMut>,
+    gathering_finished: bool,
+    announce_reflexive: bool,
+    trickle: VecDeque<String>,
+    local_candidates: Vec<rtc::peer_connection::transport::RTCIceCandidateInit>,
+    ice_servers: Vec<IceServer>,
+    state_channel: Option<rtc::data_channel::RTCDataChannelId>,
+    pending_media_state: Option<MediaState>,
+    pub remote_media_state: MediaState,
+    local_media_state: MediaState,
 }
 
 impl Engine {
     pub fn personal_channel(&mut self) -> Result<()> {
-        self.pc.create_data_channel(
+        let channel = self.pc.create_data_channel(
             "data",
             Some(rtc::data_channel::RTCDataChannelInit {
                 negotiated: Some(0),
                 ..Default::default()
             }),
         )?;
+        self.state_channel = Some(channel.id());
+        self.pending_media_state = Some(self.local_media_state);
+        Ok(())
+    }
+
+    pub fn set_media_state(&mut self, state: MediaState) -> Result<()> {
+        if !matches!(state.video_rotation, 0 | 90 | 180 | 270) {
+            return Err(Error::Invalid("invalid camera rotation".into()));
+        }
+        self.local_media_state = state;
+        self.pending_media_state = Some(state);
+        self.service_media_state(Instant::now())
+    }
+
+    fn service_media_state(&mut self, now: Instant) -> Result<()> {
+        if let Some(id) = self.state_channel
+            && let Some(state) = self.pending_media_state
+            && let Some(mut channel) = self.pc.data_channel(id)
+            && channel.ready_state() == rtc::data_channel::RTCDataChannelState::Open
+            && channel.outstanding_bytes() < 4096
+        {
+            let mut value =
+                serde_json::to_value(state).map_err(|e| Error::Invalid(e.to_string()))?;
+            value["@type"] = serde_json::json!("MediaState");
+            channel.send_text(now, value.to_string())?;
+            self.pending_media_state = None;
+        }
+        while let Some(message) = self.pc.poll_data_read() {
+            if let RTCMessage::DataChannelMessage(id, data) = message.message
+                && self.state_channel == Some(id)
+                && data.data.len() <= 1024
+                && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&data.data)
+                && value["@type"] == "MediaState"
+                && let Ok(state) = serde_json::from_value::<MediaState>(value)
+                && matches!(state.video_rotation, 0 | 90 | 180 | 270)
+            {
+                self.remote_media_state = state;
+            }
+        }
         Ok(())
     }
     pub fn one_way(&mut self) -> Result<()> {
@@ -116,6 +187,17 @@ impl Engine {
         video: Option<VideoConfig>,
         now: Instant,
     ) -> Result<Self> {
+        Self::with_ice(local, ssrc, video, Vec::new(), false, now)
+    }
+
+    pub fn with_ice(
+        local: SocketAddr,
+        ssrc: u32,
+        video: Option<VideoConfig>,
+        servers: Vec<IceServer>,
+        relay_only: bool,
+        now: Instant,
+    ) -> Result<Self> {
         if ssrc == 0 || ssrc >= u32::MAX - 1 || local.port() == 0 {
             return Err(Error::Invalid("invalid local transport or SSRC".into()));
         }
@@ -155,6 +237,7 @@ impl Engine {
             .with_setting_engine(
                 SettingEngineBuilder::default()
                     .with_multicast_dns_mode(rtc::ice::mdns::MulticastDnsMode::Disabled)
+                    .with_discard_local_candidates_during_ice_restart(true)
                     .build(),
             )
             .build(now)?;
@@ -164,16 +247,31 @@ impl Engine {
         } else {
             None
         };
-        let candidate = format!(
-            "candidate:1 1 udp 2130706431 {} {} typ host",
-            local.ip(),
-            local.port()
-        );
-        pc.add_local_candidate(rtc::peer_connection::transport::RTCIceCandidateInit {
-            candidate,
-            ..Default::default()
-        })?;
-        pc.add_local_candidate(rtc::peer_connection::transport::RTCIceCandidateInit::default())?;
+        if relay_only
+            && !servers.iter().any(|server| {
+                server.turn
+                    && server
+                        .address()
+                        .is_ok_and(|addr| addr.is_ipv4() == local.is_ipv4())
+            })
+        {
+            return Err(Error::Invalid(
+                "relay-only ICE requires a TURN server for the socket family".into(),
+            ));
+        }
+        let local_candidates: Vec<_> = (!relay_only)
+            .then(|| host_candidate(local))
+            .into_iter()
+            .collect();
+        for candidate in &local_candidates {
+            pc.add_local_candidate(candidate.clone())?;
+        }
+        let mut ice_io = IceIo::new(local, servers.clone(), now)?;
+        let wire = ice_io.poll(local, now)?.into();
+        let gathering_finished = ice_io.gathering_complete();
+        if gathering_finished {
+            pc.add_local_candidate(Default::default())?;
+        }
         Ok(Self {
             pc,
             local,
@@ -192,6 +290,17 @@ impl Engine {
             audio: VecDeque::new(),
             video: VecDeque::new(),
             connection_state: "New".into(),
+            ice_io,
+            wire,
+            gathering_finished,
+            announce_reflexive: !relay_only,
+            trickle: VecDeque::new(),
+            local_candidates,
+            ice_servers: servers,
+            state_channel: None,
+            pending_media_state: None,
+            remote_media_state: MediaState::default(),
+            local_media_state: MediaState::default(),
         })
     }
     pub fn offer(&mut self) -> Result<String> {
@@ -201,6 +310,43 @@ impl Engine {
             .local_description()
             .map(|s| s.sdp.clone())
             .ok_or(Error::Closed)
+    }
+    pub fn restart_offer(&mut self, local: SocketAddr, now: Instant) -> Result<String> {
+        if local.ip().is_unspecified() || local.port() == 0 {
+            return Err(Error::Invalid("invalid socket for ICE restart".into()));
+        }
+        if local != self.local {
+            let mut io = IceIo::new(local, self.ice_servers.clone(), now)?;
+            self.wire = io.poll(local, now)?.into();
+            self.gathering_finished = io.gathering_complete();
+            self.ice_io = io;
+            self.local = local;
+            self.local_candidates = self
+                .announce_reflexive
+                .then(|| host_candidate(local))
+                .into_iter()
+                .collect();
+        }
+        self.trickle.clear();
+        self.pc.restart_ice();
+        // The staged restart commits when the offer is installed, discarding
+        // the old socket's candidates. Publish only the new generation below.
+        self.offer()?;
+        for candidate in &self.local_candidates {
+            self.pc.add_local_candidate(candidate.clone())?;
+            self.trickle.push_back(candidate.candidate.clone());
+        }
+        if self.gathering_finished {
+            self.pc.add_local_candidate(Default::default())?;
+        }
+        self.pc
+            .local_description()
+            .map(|s| s.sdp.clone())
+            .ok_or(Error::Closed)
+    }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local
     }
     pub fn answer(&mut self, offer: String) -> Result<String> {
         crate::packet::validate_sdp(&offer)?;
@@ -221,27 +367,72 @@ impl Engine {
     }
     pub fn tick(&mut self, now: Instant) -> Result<()> {
         self.pc.handle_timeout(now)?;
+        self.service_ice(now)?;
         self.drain_media()
     }
     pub fn receive_datagram(&mut self, peer: SocketAddr, bytes: &[u8], now: Instant) -> Result<()> {
         if bytes.len() > 65535 {
             return Err(Error::Invalid("datagram too large".into()));
         }
-        self.pc.handle_read(TaggedBytesMut {
-            now,
-            transport: TransportContext {
-                local_addr: self.local,
-                peer_addr: peer,
-                transport_protocol: TransportProtocol::UDP,
-                ecn: None,
-            },
-            message: BytesMut::from(bytes),
-        })?;
+        let input = datagram(self.local, peer, BytesMut::from(bytes), now);
+        let (direct, candidate) = self.ice_io.receive(input, self.announce_reflexive)?;
+        if let Some(input) = direct {
+            self.pc.handle_read(input)?;
+        }
+        if let Some(candidate) = candidate {
+            self.add_gathered(candidate)?;
+        }
+        self.service_ice(now)?;
         self.drain_media()
     }
-    pub fn outgoing(&mut self) -> Vec<Datagram> {
-        let mut out = vec![];
-        while let Some(packet) = self.pc.poll_write() {
+    fn add_gathered(
+        &mut self,
+        candidate: rtc::peer_connection::transport::RTCIceCandidateInit,
+    ) -> Result<()> {
+        if !self
+            .local_candidates
+            .iter()
+            .any(|current| current.candidate == candidate.candidate)
+        {
+            self.pc.add_local_candidate(candidate.clone())?;
+            self.trickle.push_back(candidate.candidate.clone());
+            self.local_candidates.push(candidate);
+        }
+        Ok(())
+    }
+
+    fn service_ice(&mut self, now: Instant) -> Result<()> {
+        let (candidates, incoming) = self.ice_io.turn_events(self.local, now)?;
+        for candidate in candidates {
+            self.add_gathered(candidate)?;
+        }
+        for packet in incoming {
+            self.pc.handle_read(packet)?;
+        }
+        if !self.gathering_finished && self.ice_io.gathering_complete() {
+            self.pc.add_local_candidate(Default::default())?;
+            self.gathering_finished = true;
+        }
+        Ok(())
+    }
+
+    pub fn gathered_candidates(&mut self) -> impl Iterator<Item = String> + '_ {
+        self.trickle.drain(..)
+    }
+
+    pub fn outgoing(&mut self) -> Result<Vec<Datagram>> {
+        for _ in 0..128 {
+            let Some(packet) = self.pc.poll_write() else {
+                break;
+            };
+            if let Some(packet) = self.ice_io.send(packet)? {
+                self.wire.push_back(packet);
+            }
+        }
+        self.wire
+            .extend(self.ice_io.poll(self.local, Instant::now())?);
+        let mut out = Vec::new();
+        while let Some(packet) = self.wire.pop_front() {
             out.push(Datagram {
                 peer: packet.transport.peer_addr.to_string(),
                 bytes: packet.message.to_vec(),
@@ -250,9 +441,20 @@ impl Engine {
                 break;
             }
         }
-        out
+        if self.wire.len() > 256 {
+            self.wire.truncate(256);
+        }
+        Ok(out)
     }
     pub fn send_audio(&mut self, pcm: &[u8], now: Instant) -> Result<u32> {
+        if self.local_media_state.muted {
+            if pcm.len() != crate::PCM_BYTES {
+                return Err(Error::Invalid("invalid PCM length".into()));
+            }
+            let timestamp = self.timestamp;
+            self.timestamp = self.timestamp.wrapping_add(960);
+            return Ok(timestamp);
+        }
         let payload = self.audio_encoder.encode(pcm)?;
         let timestamp = self.timestamp;
         self.pc
@@ -331,6 +533,7 @@ impl Engine {
                 _ => {}
             }
         }
+        self.service_media_state(Instant::now())?;
         while let Some(message) = self.pc.poll_media_read() {
             let RTCMessage::RtpPacket(track, packet) = message.message else {
                 continue;
@@ -421,6 +624,17 @@ impl Engine {
             }
         }
         Ok(())
+    }
+}
+
+fn host_candidate(local: SocketAddr) -> rtc::peer_connection::transport::RTCIceCandidateInit {
+    rtc::peer_connection::transport::RTCIceCandidateInit {
+        candidate: format!(
+            "candidate:1 1 udp 2130706431 {} {} typ host",
+            local.ip(),
+            local.port()
+        ),
+        ..Default::default()
     }
 }
 fn make_track(ssrc: u32, kind: RtpCodecKind, codec: RTCRtpCodec) -> MediaStreamTrack {

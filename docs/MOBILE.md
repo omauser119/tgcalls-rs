@@ -79,7 +79,9 @@ base64 strings. Every successful response contains `ok=true`, `payload`, and
 optional `datagrams`, `audio`, `video`, `signaling` arrays. **Consume media and
 datagrams from every response**, including negotiation and tick responses.
 
-1. Bind UDP in the app; `new(local, ssrc, video?)` creates the worker. Video is
+1. Bind UDP in the app; `new(local, ssrc, video?, ice_servers?, relay_only?)`
+   creates the worker. Standard UDP STUN/TURN endpoints use numerical addresses.
+   Video is
    bounded Baseline H.264 level 3.1, I420, multiples of 16, up to 1280x720,
    1–60 fps subject to 108,000 macroblocks/sec (720p is at most 30 fps).
 2. Generic WebRTC tests use `offer`, `answer(sdp)`, `accept_answer(sdp)`.
@@ -95,13 +97,19 @@ datagrams from every response**, including negotiation and tick responses.
 5. Feed incoming UDP to `packet(peer, bytes)`, send every outgoing datagram, and
    call `tick` every 10 ms. `send_audio(pcm)` accepts exactly 3840 s16le bytes
    (20 ms, 48 kHz stereo); `send_video(i420)` accepts the configured frame size.
-6. Destroy the client to end a call. Create a new one after isolation failure.
+6. For device PCM, send `configure_audio`, then `render_audio` and `capture_audio`
+   in exact 10 ms blocks. AEC3 and adaptive digital gain use Sonora. `nnnoiseless`
+   runs one denoiser per capture channel at 48 kHz. Feed the actual far-end playback
+   mix and supply measured capture/playback delay in milliseconds. The worker
+   combines two stereo blocks into one 20 ms Opus frame. The app owns devices.
+7. When a network change requires rebinding a personal call, supply the new UDP
+   socket address with `rebind_personal(local)` and forward new signaling and ICE.
+   Destroy the client to end a call. Create a new one after isolation failure.
 
 Group audio uses `group_payload` → `phone.joinGroupCall` → `group_connect(params)`;
-the richer Linux Python adapter also manages remote audio SSRCs. The mobile
-host-driven path currently has host ICE candidates, without STUN gathering or
-TURN allocation. For arbitrary Internet/NAT connectivity this must be extended;
-do not advertise universal Telegram calling based on LAN loopback tests.
+the Linux Python adapter also manages remote audio SSRCs. The host-driven UDP
+path gathers server-reflexive and relayed candidates from standard STUN/TURN
+endpoints. Mobile NAT, roaming and relay paths need device validation.
 Telegram reflector/MTProto media transport, V3 signaling and simulcast are not
 implemented. Core personal/video support is not yet exposed by the legacy Python
 NTgCalls adapter. See COMPATIBILITY.md for the current scope.

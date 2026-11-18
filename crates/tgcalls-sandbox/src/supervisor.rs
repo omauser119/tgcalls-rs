@@ -19,13 +19,15 @@ use std::{
 use tgcalls_core::{AudioFrame, PCM_BYTES, SessionStats};
 use tokio::{
     process::{Child, Command},
-    sync::Mutex,
+    sync::{Mutex, watch},
 };
 
 struct Process {
     child: Child,
     control: tokio::net::UnixStream,
     audio: SharedAudio,
+    audio_ready: ipc::AudioSignal,
+    output_ready: Arc<ipc::AudioSignal>,
     timestamp: u32,
 }
 
@@ -33,6 +35,8 @@ impl Process {
     async fn spawn(helper: &Path, config: &Config, ip: IpAddr) -> Result<Self> {
         let (parent, child_socket) = UnixStream::pair()?;
         let audio = SharedAudio::create()?;
+        let audio_ready = ipc::AudioSignal::create()?;
+        let output_ready = Arc::new(ipc::AudioSignal::create()?);
         let sockets = [
             UdpSocket::bind(SocketAddr::new(ip, 0))?,
             UdpSocket::bind(SocketAddr::new(ip, 0))?,
@@ -67,6 +71,8 @@ impl Process {
             &parent,
             &[
                 audio.fd().as_raw_fd(),
+                audio_ready.raw_fd(),
+                output_ready.raw_fd(),
                 sockets[0].as_raw_fd(),
                 sockets[1].as_raw_fd(),
             ],
@@ -77,6 +83,8 @@ impl Process {
             child,
             control,
             audio,
+            audio_ready,
+            output_ready,
             timestamp: 0,
         };
         let hello: Response = tokio::time::timeout(
@@ -135,6 +143,7 @@ pub struct Sandbox {
     generation: AtomicU64,
     needs_rejoin: AtomicBool,
     closed: AtomicBool,
+    process_changed: watch::Sender<()>,
 }
 
 impl Sandbox {
@@ -152,6 +161,7 @@ impl Sandbox {
             ip,
             generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
+            process_changed: watch::channel(()).0,
         });
         let weak = Arc::downgrade(&sandbox);
         tokio::spawn(async move {
@@ -199,6 +209,7 @@ impl Sandbox {
     }
 
     async fn restart_locked(&self, state: &mut State, reason: String) {
+        self.process_changed.send_replace(());
         if let Some(mut process) = state.process.take() {
             process.terminate().await;
         }
@@ -301,16 +312,18 @@ impl Sandbox {
                 target_delay_ms: 0,
             },
         )?;
+        process.audio_ready.signal()?;
         process.timestamp = timestamp.wrapping_add(tgcalls_core::FRAME_SAMPLES as u32);
         Ok(timestamp)
     }
     pub async fn receive(&self, timeout: Duration) -> Result<AudioFrame> {
-        let deadline = Instant::now() + timeout;
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut process_changed = self.process_changed.subscribe();
         loop {
             if self.closed.load(Ordering::Acquire) {
                 bail!("sandbox closed");
             }
-            {
+            let output_ready = {
                 let state = self.state.lock().await;
                 let process = state
                     .process
@@ -319,11 +332,13 @@ impl Sandbox {
                 if let Some(frame) = process.audio.pop(true)? {
                     return Ok(frame);
                 }
+                process.output_ready.clone()
+            };
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => bail!("audio receive timed out"),
+                _ = process_changed.changed() => {},
+                ready = output_ready.wait() => ready?,
             }
-            if Instant::now() >= deadline {
-                bail!("audio receive timed out");
-            }
-            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     }
     pub async fn stats(&self) -> Result<SessionStats> {
@@ -351,6 +366,7 @@ impl Sandbox {
     }
     pub async fn close(&self) {
         self.closed.store(true, Ordering::Release);
+        self.process_changed.send_replace(());
         if let Some(mut process) = self.state.lock().await.process.take() {
             process.terminate().await;
         }

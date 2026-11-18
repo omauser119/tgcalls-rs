@@ -8,7 +8,7 @@ use std::fs::File;
 use std::mem::size_of;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use tgcalls_core::AudioFrame;
+use tgcalls_core::{AudioFrame, PCM_BYTES};
 
 const CAPACITY: usize = 32;
 const PAYLOAD: usize = 23_040; // 120ms stereo s16le @ 48kHz
@@ -22,6 +22,19 @@ struct Slot {
     concealed: AtomicU32,
     target_ms: AtomicU32,
     data: [AtomicU64; PAYLOAD / 8],
+}
+
+impl Slot {
+    fn read_pcm(&self, pcm: &mut [u8]) {
+        let (words, remaining) = pcm.as_chunks_mut::<8>();
+        for (destination, source) in words.iter_mut().zip(&self.data) {
+            *destination = source.load(Ordering::Relaxed).to_ne_bytes();
+        }
+        if !remaining.is_empty() {
+            let last = self.data[words.len()].load(Ordering::Relaxed).to_ne_bytes();
+            remaining.copy_from_slice(&last[..remaining.len()]);
+        }
+    }
 }
 #[repr(C, align(64))]
 struct Queue {
@@ -94,7 +107,21 @@ impl SharedAudio {
 
     /// The caller serializes the single producer for each direction.
     pub fn push(&self, output: bool, frame: &AudioFrame) -> Result<()> {
-        if frame.pcm.len() > PAYLOAD {
+        self.push_frame(output, &frame.pcm, frame.timestamp, Some(frame))
+    }
+
+    pub(crate) fn push_capture(&self, pcm: &[u8], timestamp: u32) -> Result<()> {
+        self.push_frame(false, pcm, timestamp, None)
+    }
+
+    fn push_frame(
+        &self,
+        output: bool,
+        pcm: &[u8],
+        timestamp: u32,
+        frame: Option<&AudioFrame>,
+    ) -> Result<()> {
+        if pcm.len() > PAYLOAD {
             bail!("audio frame too large");
         }
         let queue = self.queue(output);
@@ -108,7 +135,7 @@ impl SharedAudio {
             bail!("audio queue full");
         }
         let slot = &queue.slots[(head % CAPACITY as u64) as usize];
-        let (words, remaining) = frame.pcm.as_chunks::<8>();
+        let (words, remaining) = pcm.as_chunks::<8>();
         for (destination, source) in slot.data.iter().zip(words) {
             destination.store(u64::from_ne_bytes(*source), Ordering::Relaxed);
         }
@@ -117,21 +144,58 @@ impl SharedAudio {
             last[..remaining.len()].copy_from_slice(remaining);
             slot.data[words.len()].store(u64::from_ne_bytes(last), Ordering::Relaxed);
         }
-        slot.length.store(frame.pcm.len() as u32, Ordering::Relaxed);
-        slot.ssrc.store(frame.ssrc, Ordering::Relaxed);
-        slot.sequence
-            .store(u32::from(frame.sequence), Ordering::Relaxed);
-        slot.timestamp.store(frame.timestamp, Ordering::Relaxed);
-        slot.concealed
-            .store(u32::from(frame.concealed), Ordering::Relaxed);
-        slot.target_ms
-            .store(frame.target_delay_ms, Ordering::Relaxed);
+        slot.length.store(pcm.len() as u32, Ordering::Relaxed);
+        slot.ssrc
+            .store(frame.map_or(0, |frame| frame.ssrc), Ordering::Relaxed);
+        slot.sequence.store(
+            frame.map_or(0, |frame| u32::from(frame.sequence)),
+            Ordering::Relaxed,
+        );
+        slot.timestamp.store(timestamp, Ordering::Relaxed);
+        slot.concealed.store(
+            frame.map_or(0, |frame| u32::from(frame.concealed)),
+            Ordering::Relaxed,
+        );
+        slot.target_ms.store(
+            frame.map_or(0, |frame| frame.target_delay_ms),
+            Ordering::Relaxed,
+        );
         queue.head.store(head.wrapping_add(1), Ordering::Release);
         Ok(())
     }
 
     /// The caller serializes the single consumer for each direction.
     pub fn pop(&self, output: bool) -> Result<Option<AudioFrame>> {
+        self.pop_frame(output, |slot, length| {
+            let mut pcm = vec![0; length];
+            slot.read_pcm(&mut pcm);
+            Ok(AudioFrame {
+                pcm,
+                ssrc: slot.ssrc.load(Ordering::Relaxed),
+                sequence: slot.sequence.load(Ordering::Relaxed) as u16,
+                timestamp: slot.timestamp.load(Ordering::Relaxed),
+                concealed: slot.concealed.load(Ordering::Relaxed) != 0,
+                target_delay_ms: slot.target_ms.load(Ordering::Relaxed).min(200),
+            })
+        })
+    }
+
+    pub(crate) fn pop_capture(&self, pcm: &mut [u8; PCM_BYTES]) -> Result<bool> {
+        self.pop_frame(false, |slot, length| {
+            if length != pcm.len() {
+                bail!("invalid shared capture length");
+            }
+            slot.read_pcm(pcm);
+            Ok(())
+        })
+        .map(|frame| frame.is_some())
+    }
+
+    fn pop_frame<T>(
+        &self,
+        output: bool,
+        read: impl FnOnce(&Slot, usize) -> Result<T>,
+    ) -> Result<Option<T>> {
         let queue = self.queue(output);
         let tail = queue.tail.load(Ordering::Relaxed);
         let head = queue.head.load(Ordering::Acquire);
@@ -148,23 +212,7 @@ impl SharedAudio {
         if length > PAYLOAD {
             bail!("corrupt shared audio length");
         }
-        let mut pcm = vec![0; length];
-        let (words, remaining) = pcm.as_chunks_mut::<8>();
-        for (destination, source) in words.iter_mut().zip(&slot.data) {
-            *destination = source.load(Ordering::Relaxed).to_ne_bytes();
-        }
-        if !remaining.is_empty() {
-            let last = slot.data[words.len()].load(Ordering::Relaxed).to_ne_bytes();
-            remaining.copy_from_slice(&last[..remaining.len()]);
-        }
-        let frame = AudioFrame {
-            pcm,
-            ssrc: slot.ssrc.load(Ordering::Relaxed),
-            sequence: slot.sequence.load(Ordering::Relaxed) as u16,
-            timestamp: slot.timestamp.load(Ordering::Relaxed),
-            concealed: slot.concealed.load(Ordering::Relaxed) != 0,
-            target_delay_ms: slot.target_ms.load(Ordering::Relaxed).min(200),
-        };
+        let frame = read(slot, length)?;
         queue.tail.store(tail.wrapping_add(1), Ordering::Release);
         Ok(Some(frame))
     }

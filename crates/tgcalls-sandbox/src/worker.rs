@@ -44,8 +44,7 @@ pub fn run() -> Result<()> {
         .build()?;
     runtime.block_on(async move {
         let mut control = tokio::net::UnixStream::from_std(control)?;
-        let audio_ready = ipc::AudioSignal::attach(audio_ready)?;
-        let output_ready = ipc::AudioSignal::attach(output_ready)?;
+        let audio_ready = ipc::AudioReady::attach(audio_ready)?;
         let mut sockets = Some(sockets);
         let (session, mut media_session) = watch::channel::<Option<Arc<Session>>>(None);
         // No external SDP, JSON, RTP or Opus input is processed before this point.
@@ -63,19 +62,20 @@ pub fn run() -> Result<()> {
             else {
                 return;
             };
+            let mut pcm = [0; tgcalls_core::PCM_BYTES];
             loop {
                 if audio_ready.wait().await.is_err() {
                     std::process::exit(70);
                 }
                 let mut processed = 0;
                 loop {
-                    let frame = match input_audio.pop(false) {
-                        Ok(Some(frame)) => frame,
-                        Ok(None) => break,
+                    match input_audio.pop_capture(&mut pcm) {
+                        Ok(true) => {}
+                        Ok(false) => break,
                         Err(_) => std::process::exit(70),
-                    };
+                    }
                     if !matches!(
-                        std::panic::AssertUnwindSafe(current.send_pcm(&frame.pcm))
+                        std::panic::AssertUnwindSafe(current.send_pcm(&pcm))
                             .catch_unwind()
                             .await,
                         Ok(Ok(_))
@@ -102,7 +102,9 @@ pub fn run() -> Result<()> {
                 match current.receive(Duration::from_secs(1)).await {
                     Ok(frame) => {
                         // A full ring drops this frame without issuing a wake-up.
-                        if shared.push(true, &frame).is_ok() && output_ready.signal().is_err() {
+                        if shared.push(true, &frame).is_ok()
+                            && ipc::signal_audio(&output_ready).is_err()
+                        {
                             std::process::exit(70);
                         }
                     }

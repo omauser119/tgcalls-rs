@@ -7,7 +7,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::{
     collections::VecDeque,
     net::{IpAddr, SocketAddr, UdpSocket},
-    os::{fd::AsRawFd, unix::net::UnixStream},
+    os::{
+        fd::{AsRawFd, OwnedFd},
+        unix::net::UnixStream,
+    },
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -26,8 +29,8 @@ struct Process {
     child: Child,
     control: tokio::net::UnixStream,
     audio: SharedAudio,
-    audio_ready: ipc::AudioSignal,
-    output_ready: Arc<ipc::AudioSignal>,
+    audio_ready: OwnedFd,
+    output_ready: Arc<ipc::AudioReady>,
     timestamp: u32,
 }
 
@@ -35,8 +38,8 @@ impl Process {
     async fn spawn(helper: &Path, config: &Config, ip: IpAddr) -> Result<Self> {
         let (parent, child_socket) = UnixStream::pair()?;
         let audio = SharedAudio::create()?;
-        let audio_ready = ipc::AudioSignal::create()?;
-        let output_ready = Arc::new(ipc::AudioSignal::create()?);
+        let audio_ready = ipc::audio_event()?;
+        let output_ready = Arc::new(ipc::AudioReady::attach(ipc::audio_event()?)?);
         let sockets = [
             UdpSocket::bind(SocketAddr::new(ip, 0))?,
             UdpSocket::bind(SocketAddr::new(ip, 0))?,
@@ -71,7 +74,7 @@ impl Process {
             &parent,
             &[
                 audio.fd().as_raw_fd(),
-                audio_ready.raw_fd(),
+                audio_ready.as_raw_fd(),
                 output_ready.raw_fd(),
                 sockets[0].as_raw_fd(),
                 sockets[1].as_raw_fd(),
@@ -285,7 +288,23 @@ impl Sandbox {
             .await?;
         Ok(())
     }
-    pub async fn send_pcm(&self, pcm: Vec<u8>) -> Result<u32> {
+    pub async fn send_pcm(&self, pcm: impl AsRef<[u8]>) -> Result<u32> {
+        let pcm = pcm.as_ref();
+        let mut state = self.state.lock().await;
+        self.write_pcm(&mut state, pcm)
+    }
+
+    /// Commit a frame without blocking the calling thread. A concurrent
+    /// control operation can hold the lock, in which case the caller can await
+    /// `send_pcm` normally.
+    pub fn try_send_pcm(&self, pcm: &[u8]) -> Result<Option<u32>> {
+        let Ok(mut state) = self.state.try_lock() else {
+            return Ok(None);
+        };
+        self.write_pcm(&mut state, pcm).map(Some)
+    }
+
+    fn write_pcm(&self, state: &mut State, pcm: &[u8]) -> Result<u32> {
         if pcm.len() != PCM_BYTES {
             bail!("invalid PCM frame length");
         }
@@ -295,24 +314,13 @@ impl Sandbox {
         if self.closed.load(Ordering::Acquire) {
             bail!("sandbox closed");
         }
-        let mut state = self.state.lock().await;
         let process = state
             .process
             .as_mut()
             .ok_or_else(|| anyhow!("worker unavailable"))?;
         let timestamp = process.timestamp;
-        process.audio.push(
-            false,
-            &AudioFrame {
-                pcm,
-                ssrc: 0,
-                sequence: 0,
-                timestamp,
-                concealed: false,
-                target_delay_ms: 0,
-            },
-        )?;
-        process.audio_ready.signal()?;
+        process.audio.push_capture(pcm, timestamp)?;
+        ipc::signal_audio(&process.audio_ready)?;
         process.timestamp = timestamp.wrapping_add(tgcalls_core::FRAME_SAMPLES as u32);
         Ok(timestamp)
     }

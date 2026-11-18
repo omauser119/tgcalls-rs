@@ -2,8 +2,14 @@
 
 Обязательный протокольный путь: сгенерировать локальные ICE credentials,
 SHA-256 DTLS fingerprint и SSRC → Telegram `phone.joinGroupCall(params=DataJSON)`
-→ `UpdateGroupCallConnection.params` → ICE-lite remote answer → DTLS active
+→ `UpdateGroupCallConnection.params` → full ICE на Linux → DTLS active
 на стороне Telegram, passive на стороне клиента → SRTP Opus/PT111.
+
+В Linux-аудиотракте клиент начинает ICE в роли `controlled`. Он применяет
+параметры SFU как локально синтезированный SDP offer и сохраняет проверку
+DTLS fingerprint. Используемые в `phone.joinGroupCall` локальные credentials
+и fingerprint предварительно извлекаются из черновика SDP. Мобильный
+host-driven Worker пока использует прежний путь через SDP answer.
 
 Формат сверялся с оригинальными исходниками:
 

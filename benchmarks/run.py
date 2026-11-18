@@ -65,8 +65,11 @@ class ProcessTreeSampler:
         for process in processes:
             try:
                 key = process.pid, process.create_time()
-                cpu = process.cpu_times()
-                total_cpu = cpu.user + cpu.system
+                if process.pid == self.parent.pid:
+                    total_cpu = time.process_time_ns() / 1e9
+                else:
+                    cpu = process.cpu_times()
+                    total_cpu = cpu.user + cpu.system
                 old_cpu = self.previous.get(key, total_cpu if baseline else 0)
                 self.cpu_seconds += max(0, total_cpu - old_cpu)
                 self.previous[key] = total_cpu
@@ -75,7 +78,7 @@ class ProcessTreeSampler:
                     parent_rss += rss
                 else:
                     worker_rss += rss
-            except (self.psutil.NoSuchProcess, self.psutil.AccessDenied):
+            except (OSError, self.psutil.NoSuchProcess, self.psutil.AccessDenied):
                 continue
         self.peak_parent_rss = max(self.peak_parent_rss, parent_rss)
         self.peak_worker_rss = max(self.peak_worker_rss, worker_rss)
@@ -154,7 +157,7 @@ async def media_run(call, duration, warmup):
             except TimeoutError:
                 continue
             if frame.concealed:
-                if loop.time() >= begin + warmup:
+                if frame.timestamp in pending:
                     concealed += 1
                 continue
             started = pending.pop(frame.timestamp, None)

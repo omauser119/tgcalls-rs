@@ -1,4 +1,4 @@
-//! A real ICE-lite/DTLS/SRTP peer exercising Telegram's JSON signaling shape.
+//! A real controlling ICE/DTLS/SRTP peer exercising Telegram's JSON signaling shape.
 //! This is an SFU conformance fixture, not a live Telegram compatibility claim.
 use async_trait::async_trait;
 use rtc::ice::mdns::MulticastDnsMode;
@@ -6,6 +6,7 @@ use rtc::peer_connection::configuration::{
     media_engine::MediaEngine, setting_engine::SettingEngineBuilder,
 };
 use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
+use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use tgcalls_core::{PCM_BYTES, codec::Decoder, session::Session};
@@ -46,10 +47,10 @@ fn attr<'a>(sdp: &'a str, prefix: &str) -> Result<&'a str, Box<dyn std::error::E
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn telegram_json_bridge_reaches_a_real_ice_lite_peer()
--> Result<(), Box<dyn std::error::Error>> {
+async fn telegram_json_bridge_answers_a_controlling_sfu() -> Result<(), Box<dyn std::error::Error>>
+{
     let call = Session::group("127.0.0.1", None, 98765).await?;
-    let offer = call.local_offer().await?;
+    let template = call.local_offer().await?;
     let payload: serde_json::Value = serde_json::from_str(&call.join_payload().await?)?;
     assert_eq!(payload["ssrc"], 98765);
     let (audio, mut incoming) = mpsc::channel(8);
@@ -72,7 +73,7 @@ async fn telegram_json_bridge_reaches_a_real_ice_lite_peer()
         .with_media_engine(media)
         .with_setting_engine(
             SettingEngineBuilder::default()
-                .with_lite(true)
+                .with_prflx_acceptance_min_wait(Some(Duration::ZERO))
                 .with_multicast_dns_mode(MulticastDnsMode::Disabled)
                 .build(),
         )
@@ -81,10 +82,17 @@ async fn telegram_json_bridge_reaches_a_real_ice_lite_peer()
         .build()
         .await?;
     server
-        .set_remote_description(RTCSessionDescription::offer(offer)?)
+        .add_transceiver_from_kind(
+            RtpCodecKind::Audio,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Recvonly,
+                ..Default::default()
+            }),
+        )
         .await?;
-    let answer = server.create_answer(None).await?;
-    server.set_local_description(answer).await?;
+    server.create_data_channel("data", None).await?;
+    let offer = server.create_offer(None).await?;
+    server.set_local_description(offer).await?;
     tokio::time::timeout(Duration::from_secs(3), async {
         while !*gather_rx.borrow_and_update() {
             gather_rx.changed().await?;
@@ -92,15 +100,15 @@ async fn telegram_json_bridge_reaches_a_real_ice_lite_peer()
         Ok::<_, tokio::sync::watch::error::RecvError>(())
     })
     .await??;
-    let answer = server
+    let offer = server
         .local_description()
         .await
-        .ok_or("missing server answer")?
+        .ok_or("missing server offer")?
         .sdp;
-    let (hash, fp) = attr(&answer, "a=fingerprint:")?
+    let (hash, fp) = attr(&offer, "a=fingerprint:")?
         .split_once(' ')
         .ok_or("invalid fingerprint")?;
-    let candidates: Vec<_> = answer.lines().filter_map(|l| l.strip_prefix("a=candidate:"))
+    let candidates: Vec<_> = offer.lines().filter_map(|l| l.strip_prefix("a=candidate:"))
         .map(|line| {
             let fields: Vec<_> = line.split_whitespace().collect();
             if fields.len() < 8 { return Err("invalid candidate"); }
@@ -108,12 +116,17 @@ async fn telegram_json_bridge_reaches_a_real_ice_lite_peer()
                 "ip":fields[4], "port":fields[5], "type":fields[7]}))
         }).collect::<Result<_, _>>()?;
     let response = json!({"transport":{
-        "ufrag":attr(&answer,"a=ice-ufrag:")?, "pwd":attr(&answer,"a=ice-pwd:")?,
+        "ufrag":attr(&offer,"a=ice-ufrag:")?, "pwd":attr(&offer,"a=ice-pwd:")?,
         "fingerprints":[{"hash":hash,"setup":"active","fingerprint":fp}], "candidates":candidates,
     }})
     .to_string();
+    let answer = template.replace("a=setup:actpass", "a=setup:passive");
+    server
+        .set_remote_description(RTCSessionDescription::answer(answer)?)
+        .await?;
     call.connect_telegram(&response).await?;
-    call.send_pcm(&vec![0; PCM_BYTES]).await?;
+    call.set_sources(vec![11_111]).await?;
+    call.send_pcm(&[0; PCM_BYTES]).await?;
     let received = tokio::time::timeout(Duration::from_secs(3), incoming.recv())
         .await?
         .ok_or("missing SRTP audio")?;

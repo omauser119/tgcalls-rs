@@ -76,9 +76,10 @@ async def measure(client, group, call, mode, args):
             payload = await native.create_call(chat_id)
             mic = AudioDescription(MediaSource.EXTERNAL, 48_000, 2, "", False)
             await native.set_stream_sources(chat_id, StreamMode.CAPTURE, MediaDescription(mic, None, None, None))
+            metadata = FrameData()
 
             async def send(pcm):
-                await native.send_external_frame(chat_id, StreamDevice.MICROPHONE, pcm, FrameData())
+                await native.send_external_frame(chat_id, StreamDevice.MICROPHONE, pcm, metadata)
         else:
             rust = Call(hardened=mode == "hardened", helper_path=args.helper)
             payload = await rust.create_call()
@@ -93,15 +94,18 @@ async def measure(client, group, call, mode, args):
                        if isinstance(u, types.UpdateGroupCallConnection) and not u.presentation), None)
         if params is None:
             raise RuntimeError("missing group transport response")
+        async def establish_transport():
+            if native is None:
+                await rust.connect(params)
+                return
+            await native.connect(chat_id, params, False)
+            if await native.get_connection_mode(chat_id) != ConnectionMode.RTC:
+                raise RuntimeError("expected Telegram RTC transport")
+            await connected.wait()
+
         connect_start = time.perf_counter()
         try:
-            if native is not None:
-                await native.connect(chat_id, params, False)
-                if await native.get_connection_mode(chat_id) != ConnectionMode.RTC:
-                    raise RuntimeError("expected Telegram RTC transport")
-                await asyncio.wait_for(connected.wait(), 12)
-            else:
-                await rust.connect(params)
+            await asyncio.wait_for(establish_transport(), 12)
         except Exception as error:
             # Prohibit connection data or credentials from entering the artifacts.
             raise RuntimeError(f"transport setup: {type(error).__name__}") from None
@@ -112,19 +116,23 @@ async def measure(client, group, call, mode, args):
         worker_pids = [initial_stats["worker_pid"]] if initial_stats else []
         sampler = ProcessTreeSampler(worker_pids)
         pcm = tone()
+        blocks = (pcm,)
+        if native is not None:
+            # NTgCalls AudioSink reads one 10 ms block per external callback.
+            # Schedule both halves so the engines consume identical PCM.
+            half = len(pcm) // 2
+            blocks = (pcm[:half], pcm[half:])
+        step = .02 / len(blocks)
+        frames = round(args.seconds * 50)
+        count = frames * len(blocks)
         start = time.perf_counter()
-        finish = start + args.seconds
-        deadline = start
         last_check = start
-        frames = 0
         sampler.sample(baseline=True)
-        while time.perf_counter() < finish:
+        for index in range(count):
             if terminated.is_set():
                 raise RuntimeError("call disconnected")
-            await send(pcm)
-            frames += 1
-            deadline += .02
-            if frames % 3 == 0:
+            await send(blocks[index % len(blocks)])
+            if (index + 1) % (3 * len(blocks)) == 0:
                 sampler.sample()
             if time.perf_counter() - last_check >= 4:
                 live = await check_group_sources(client, call, [source])
@@ -132,7 +140,7 @@ async def measure(client, group, call, mode, args):
                     raise RuntimeError("Telegram no longer sees local audio source")
                 await check_solo(client, group, call)
                 last_check = time.perf_counter()
-            await asyncio.sleep(max(0, deadline - time.perf_counter()))
+            await asyncio.sleep(max(0, start + (index + 1) * step - time.perf_counter()))
         elapsed = time.perf_counter() - start
         sampler.sample()
         await check_solo(client, group, call)
@@ -149,6 +157,8 @@ async def measure(client, group, call, mode, args):
         return {
             "mode": mode, "setup_ms": setup_ms, "transport_setup_ms": transport_setup_ms,
             "submitted_frames": frames,
+            "submitted_blocks": count, "block_duration_ms": 1000 * step,
+            "submitted_pcm_bytes": frames * len(pcm),
             "wall_seconds": elapsed, "cpu_seconds": sampler.cpu_seconds,
             "peak_tree_rss_bytes": sampler.peak_rss, "call_participants": 1,
             "worker_voluntary_switches": sampler.worker_switch_delta(),
@@ -165,7 +175,7 @@ async def measure(client, group, call, mode, args):
 
 
 async def run(args):
-    from telethon import TelegramClient, functions, types
+    from telethon import TelegramClient, errors, functions, types
 
     with tempfile.TemporaryDirectory(prefix="tgcalls-bench-") as temp:
         session = Path(temp) / "test.session"
@@ -175,16 +185,17 @@ async def run(args):
             with sqlite3.connect(session) as dst:
                 src.backup(dst)
         client = TelegramClient(str(session), int(os.environ["TG_API_ID"]), os.environ["TG_API_HASH"],
-                                connection_retries=1, request_retries=1)
+                                connection_retries=1, request_retries=1, flood_sleep_threshold=0)
         group = call = None
         created_group = False
         reports = []
         artifact = {
-            "schema": 2,
+            "schema": 4,
             "scenario": "private Telegram group, one participant, synthesized 48 kHz stereo PCM upload",
             "scope": "upload and transport setup only; no remote decode, RTT or general security claim",
             "ntgcalls_baseline": importlib.metadata.version("ntgcalls"),
             "seconds_per_run": args.seconds,
+            "transport_deadline_seconds": 12,
             "results": reports,
         }
         try:
@@ -228,24 +239,39 @@ async def run(args):
                 for mode in modes if repeat % 2 == 0 else reversed(modes):
                     try:
                         row = await asyncio.wait_for(measure(client, group, call, mode, args), args.seconds + 45)
+                    except errors.FloodWaitError as error:
+                        reports.append({"mode": mode, "error": "FloodWaitError", "repetition": repeat})
+                        artifact["retry_after_seconds"] = error.seconds
+                        print(mode, "Telegram rate limit", flush=True)
+                        return 1
                     except Exception as error:
                         row = {"mode": mode, "error": type(error).__name__}
                         if isinstance(error, RuntimeError) and str(error).startswith("transport setup:"):
                             row["stage"] = str(error)
                     reports.append(dict(row, repetition=repeat))
                     print(mode, row.get("stage", row.get("error", "completed")), flush=True)
+        except errors.FloodWaitError as error:
+            artifact["retry_after_seconds"] = error.seconds
+            print("Telegram rate limit", flush=True)
+            return 1
         finally:
             try:
-                if call is not None:
-                    await client(functions.phone.DiscardGroupCallRequest(call=call))
-            finally:
                 try:
-                    if created_group and group is not None:
-                        await client(functions.channels.DeleteChannelRequest(group))
+                    if call is not None:
+                        await client(functions.phone.DiscardGroupCallRequest(call=call))
                 finally:
-                    await client.disconnect()
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(json.dumps(artifact, indent=2) + "\n")
+                    try:
+                        if created_group and group is not None:
+                            await client(functions.channels.DeleteChannelRequest(group))
+                    finally:
+                        await client.disconnect()
+            except errors.FloodWaitError as error:
+                artifact["retry_after_seconds"] = max(artifact.get("retry_after_seconds", 0), error.seconds)
+                artifact["cleanup_error"] = type(error).__name__
+                raise
+            finally:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(json.dumps(artifact, indent=2) + "\n")
     return 1 if any("error" in row for row in reports) else 0
 
 
@@ -268,10 +294,15 @@ def run_isolated(args):
                     exit_status = 1
                 if path.is_file():
                     artifact = json.loads(path.read_text())
+                    if "retry_after_seconds" in artifact:
+                        results.extend(dict(row, repetition=repeat) for row in artifact["results"])
+                        break
                     if artifact["results"]:
                         results.extend(dict(row, repetition=repeat) for row in artifact["results"])
                         continue
                 results.append({"mode": mode, "repetition": repeat, "error": "measurement process failed"})
+            if "retry_after_seconds" in artifact:
+                break
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(dict(artifact, results=results, process_isolation=True), indent=2) + "\n")
     return exit_status

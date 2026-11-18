@@ -14,13 +14,24 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub const MAX_CONTROL: usize = 65_536;
 const BOOTSTRAP: u8 = b'3';
 
-pub struct AudioSignal(AsyncFd<OwnedFd>);
+pub fn audio_event() -> Result<OwnedFd> {
+    Ok(EventFd::from_flags(EfdFlags::EFD_CLOEXEC | EfdFlags::EFD_NONBLOCK)?.into())
+}
 
-impl AudioSignal {
-    pub fn create() -> Result<Self> {
-        Self::attach(EventFd::from_flags(EfdFlags::EFD_CLOEXEC | EfdFlags::EFD_NONBLOCK)?.into())
+pub fn signal_audio(fd: &OwnedFd) -> Result<()> {
+    loop {
+        match nix::unistd::write(fd, &1u64.to_ne_bytes()) {
+            Ok(8) | Err(Errno::EAGAIN) => return Ok(()),
+            Err(Errno::EINTR) => continue,
+            Err(error) => return Err(error.into()),
+            Ok(_) => bail!("short eventfd write"),
+        }
     }
+}
 
+pub struct AudioReady(AsyncFd<OwnedFd>);
+
+impl AudioReady {
     pub fn attach(fd: OwnedFd) -> Result<Self> {
         // SAFETY: OwnedFd keeps the descriptor open and its number stable
         // throughout the registration lifetime. The broker sets O_NONBLOCK.
@@ -31,17 +42,6 @@ impl AudioSignal {
 
     pub fn raw_fd(&self) -> RawFd {
         self.0.get_ref().as_raw_fd()
-    }
-
-    pub fn signal(&self) -> Result<()> {
-        loop {
-            match nix::unistd::write(self.0.get_ref(), &1u64.to_ne_bytes()) {
-                Ok(8) | Err(Errno::EAGAIN) => return Ok(()),
-                Err(Errno::EINTR) => continue,
-                Err(error) => return Err(error.into()),
-                Ok(_) => bail!("short eventfd write"),
-            }
-        }
     }
 
     pub async fn wait(&self) -> Result<()> {

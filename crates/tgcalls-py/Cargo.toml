@@ -13,6 +13,7 @@ extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 anyhow.workspace = true
+futures.workspace = true
 pyo3 = { version = "0.30.1", features = ["abi3-py311"] }
 serde_json.workspace = true
 tokio.workspace = true

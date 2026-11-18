@@ -78,6 +78,18 @@ fn opus_plc_tracks_remote_packet_duration() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
+fn jitter_plays_the_first_frame_at_its_clean_network_deadline() {
+    let begin = Instant::now();
+    let mut buffer = JitterBuffer::default();
+    buffer.push(0, 0, begin, 42);
+    assert_eq!(buffer.pop(begin + Duration::from_millis(19)), None);
+    assert_eq!(
+        buffer.pop(begin + Duration::from_millis(20)),
+        Some(Some(42))
+    );
+}
+
+#[test]
 fn jitter_increases_playout_delay_after_a_late_packet() {
     let begin = Instant::now();
     let mut buffer = JitterBuffer::default();

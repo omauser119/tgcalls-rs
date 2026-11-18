@@ -1,12 +1,14 @@
-//! Panic-contained synchronous primitives; the Python API runs them via asyncio.to_thread.
+//! Panic-contained Python bindings for the engine's Tokio runtime.
 use anyhow::{Result, anyhow, bail};
+use futures::FutureExt;
 use pyo3::{
     exceptions::{PyRuntimeError, PyTimeoutError, PyValueError},
     prelude::*,
-    types::PyBytes,
+    types::{PyBytes, PyBytesMethods},
 };
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
+    panic::AssertUnwindSafe,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -55,15 +57,35 @@ enum Backend {
     Hardened(Arc<Sandbox>),
 }
 
+impl Backend {
+    async fn send_pcm(&self, pcm: &[u8]) -> Result<u32> {
+        match self {
+            Self::Standard(session) => Ok(session.send_pcm(pcm).await?),
+            Self::Hardened(sandbox) => sandbox.send_pcm(pcm).await,
+        }
+    }
+}
+
 #[pyclass(frozen)]
 struct Engine {
-    runtime: tokio::runtime::Runtime,
+    runtime: tokio::runtime::Handle,
+    owned_runtime: Option<tokio::runtime::Runtime>,
     backend: Mutex<Option<Arc<Backend>>>,
     hardened: bool,
     helper: Option<PathBuf>,
     bind_ip: Option<IpAddr>,
     lifecycle: Mutex<()>,
     closed: AtomicBool,
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.owned_runtime.take() {
+            // A pending PCM task can be waiting to attach to Python. Dropping
+            // the runtime under the GIL must not wait for those threads.
+            runtime.shutdown_background();
+        }
+    }
 }
 
 fn python_error(error: anyhow::Error) -> PyErr {
@@ -82,6 +104,12 @@ fn python_error(error: anyhow::Error) -> PyErr {
     } else {
         PyRuntimeError::new_err(format!("{error:#}"))
     }
+}
+
+fn pcm_result(result: std::thread::Result<Result<u32>>) -> PyResult<u32> {
+    result
+        .map_err(|_| PyRuntimeError::new_err("Rust panic contained during PCM submission"))?
+        .map_err(python_error)
 }
 
 impl Engine {
@@ -163,12 +191,13 @@ impl Engine {
                 })
                 .transpose()?;
             let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
+                .worker_threads(if hardened { 1 } else { 2 })
                 .enable_all()
                 .build()
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             Ok(Self {
-                runtime,
+                runtime: runtime.handle().clone(),
+                owned_runtime: Some(runtime),
                 backend: Mutex::new(None),
                 hardened,
                 helper: helper_path,
@@ -289,17 +318,63 @@ impl Engine {
         }))
     }
 
-    fn send_pcm(&self, py: Python<'_>, pcm: Vec<u8>) -> PyResult<u32> {
+    fn send_pcm(&self, py: Python<'_>, pcm: &Bound<'_, PyBytes>) -> PyResult<u32> {
+        let pcm = pcm.as_bytes();
         ffi_guard!(py.detach(|| {
             self.runtime
-                .block_on(async {
-                    match &*self.current()? {
-                        Backend::Standard(session) => Ok(session.send_pcm(&pcm).await?),
-                        Backend::Hardened(sandbox) => sandbox.send_pcm(pcm).await,
-                    }
-                })
+                .block_on(async { self.current()?.send_pcm(pcm).await })
                 .map_err(python_error)
         }))
+    }
+
+    fn try_send_pcm(&self, pcm: &Bound<'_, PyBytes>) -> PyResult<Option<u32>> {
+        ffi_guard!({
+            match &*self.current().map_err(python_error)? {
+                Backend::Standard(_) => Ok(None),
+                Backend::Hardened(sandbox) => {
+                    sandbox.try_send_pcm(pcm.as_bytes()).map_err(python_error)
+                }
+            }
+        })
+    }
+
+    fn submit_pcm(
+        &self,
+        py: Python<'_>,
+        pcm: Py<PyBytes>,
+        complete: Py<PyAny>,
+    ) -> PyResult<Option<u32>> {
+        ffi_guard!({
+            if pcm.as_bytes(py).len() != tgcalls_core::PCM_BYTES {
+                return Err(PyValueError::new_err("invalid PCM frame length"));
+            }
+            let backend = self.current().map_err(python_error)?;
+            let mut send = Box::pin(
+                AssertUnwindSafe(async move {
+                    // Py<PyBytes> owns the immutable allocation for the whole send,
+                    // including when the future is moved to Tokio after backpressure.
+                    let samples = Python::attach(|py| pcm.as_bytes(py));
+                    backend.send_pcm(samples).await
+                })
+                .catch_unwind(),
+            );
+            if let Some(result) = py.detach(|| send.as_mut().now_or_never()) {
+                return pcm_result(result).map(Some);
+            }
+            self.runtime.spawn(async move {
+                let result = pcm_result(send.await);
+                let _ = Python::try_attach(|py| {
+                    let result = match result {
+                        Ok(timestamp) => complete.call1(py, (timestamp, py.None())),
+                        Err(error) => complete.call1(py, (py.None(), error.into_value(py))),
+                    };
+                    if let Err(error) = result {
+                        error.write_unraisable(py, Some(complete.bind(py)));
+                    }
+                });
+            });
+            Ok(None)
+        })
     }
 
     #[pyo3(signature = (timeout_ms=1000))]

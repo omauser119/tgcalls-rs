@@ -2696,6 +2696,7 @@ name = "tgcalls-py"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures",
  "pyo3",
  "serde_json",
  "tgcalls-core",

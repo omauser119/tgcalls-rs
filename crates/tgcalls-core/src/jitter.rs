@@ -2,6 +2,9 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+const MIN_DELAY_MS: u32 = 20;
+const MAX_DELAY_MS: u32 = 200;
+
 pub struct JitterBuffer<T> {
     packets: BTreeMap<i64, T>,
     next: Option<i64>,
@@ -24,10 +27,10 @@ impl<T> Default for JitterBuffer<T> {
             highest: 0,
             previous: None,
             jitter: 0.0,
-            target_ms: 40,
+            target_ms: MIN_DELAY_MS,
             start: None,
             last_pop: None,
-            applied_delay_ms: 40,
+            applied_delay_ms: MIN_DELAY_MS,
             frame_ms: 20,
             dropped: 0,
         }
@@ -50,7 +53,7 @@ impl<T> JitterBuffer<T> {
                     now.saturating_duration_since(last_arrival).as_secs_f64() * 48_000.0;
                 let media_delta = f64::from(timestamp.wrapping_sub(last_ts) as i32);
                 self.jitter += ((arrival_delta - media_delta).abs() - self.jitter) / 16.0;
-                self.target_ms = (20.0 + 4.0 * self.jitter / 48.0).clamp(40.0, 200.0) as u32;
+                self.update_target();
             }
             self.previous = Some((now, timestamp));
         }
@@ -121,6 +124,17 @@ impl<T> JitterBuffer<T> {
     }
 
     pub fn set_frame_samples(&mut self, samples: usize) {
-        self.frame_ms = (samples.saturating_mul(1000) / crate::SAMPLE_RATE).clamp(2, 120) as u32;
+        let frame_ms = (samples.saturating_mul(1000) / crate::SAMPLE_RATE).clamp(2, 120) as u32;
+        if frame_ms != self.frame_ms {
+            self.frame_ms = frame_ms;
+            self.update_target();
+        }
+    }
+
+    fn update_target(&mut self) {
+        // One audio frame of base buffering plus the observed jitter margin.
+        self.target_ms = (f64::from(self.frame_ms) + 4.0 * self.jitter / 48.0)
+            .clamp(f64::from(MIN_DELAY_MS), f64::from(MAX_DELAY_MS))
+            as u32;
     }
 }

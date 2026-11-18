@@ -12,6 +12,7 @@ use rtc::peer_connection::configuration::interceptor_registry::register_default_
 use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtc::peer_connection::transport::RTCDtlsRole;
 use rtc::rtp::{Packet, header::Header};
 use rtc::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability;
 use rtc::rtp_transceiver::rtp_sender::{
@@ -288,6 +289,12 @@ struct Peer {
     video_output: Option<Arc<TrackLocalStaticSample>>,
 }
 
+enum PeerKind {
+    Loopback,
+    Personal,
+    Group,
+}
+
 impl Peer {
     #[allow(clippy::too_many_arguments)]
     async fn new(
@@ -300,7 +307,7 @@ impl Peer {
         ssrc: u32,
         video: Option<VideoConfig>,
         video_frames: mpsc::Sender<Result<VideoFrame>>,
-        one_way: bool,
+        kind: PeerKind,
         ice_servers: Vec<webrtc::peer_connection::RTCIceServer>,
     ) -> Result<Self> {
         let codec = RTCRtpCodec {
@@ -395,6 +402,13 @@ impl Peer {
             video_frames,
             echo_video: if echo { video_output.clone() } else { None },
         });
+        let mut settings =
+            SettingEngineBuilder::default().with_multicast_dns_mode(MulticastDnsMode::Disabled);
+        if matches!(kind, PeerKind::Group) {
+            settings = settings
+                .with_answering_dtls_role(RTCDtlsRole::Server)
+                .with_ice_connection_attempts(Some(Duration::from_millis(50)), Some(48));
+        }
         let mut builder = PeerConnectionBuilder::new()
             .with_media_engine(media)
             .with_configuration(
@@ -405,11 +419,7 @@ impl Peer {
             .with_interceptor_registry(registry)
             .with_handler(handler)
             .with_data_channel_send_buffer_limit(64 * 1024)
-            .with_setting_engine(
-                SettingEngineBuilder::default()
-                    .with_multicast_dns_mode(MulticastDnsMode::Disabled)
-                    .build(),
-            )
+            .with_setting_engine(settings.build())
             .with_udp_addrs(vec![std::net::SocketAddr::new(
                 bind_ip
                     .parse()
@@ -422,6 +432,7 @@ impl Peer {
                 .with_prebound_udp_sockets(vec![socket]);
         }
         let pc: Arc<dyn PeerConnection> = Arc::new(builder.build().await?);
+        let one_way = !matches!(kind, PeerKind::Loopback);
         if one_way {
             pc.add_transceiver_from_track(
                 output.clone(),
@@ -481,6 +492,15 @@ impl Peer {
             .ok_or(Error::Closed)
     }
 
+    async fn answer_sfu(&self, template: &str, params: &str, sources: &[u32]) -> Result<()> {
+        let offer = telegram::sfu_offer_sdp(template, params, sources)?;
+        self.pc
+            .set_remote_description(RTCSessionDescription::offer(offer)?)
+            .await?;
+        let answer = self.pc.create_answer(None).await?;
+        Ok(self.pc.set_local_description(answer).await?)
+    }
+
     async fn wait_connected(&self) -> Result<()> {
         let mut state = self.state.clone();
         tokio::time::timeout(TIMEOUT, async {
@@ -533,7 +553,7 @@ impl Session {
             ssrc,
             video.clone(),
             vtx,
-            true,
+            PeerKind::Personal,
             servers,
         )
         .await?;
@@ -578,7 +598,7 @@ impl Session {
             1001,
             video.clone(),
             vtx.clone(),
-            false,
+            PeerKind::Loopback,
             vec![],
         )
         .await?;
@@ -592,7 +612,7 @@ impl Session {
             1002,
             video.clone(),
             vtx,
-            false,
+            PeerKind::Loopback,
             vec![],
         )
         .await?;
@@ -660,12 +680,14 @@ impl Session {
             ssrc,
             video.clone(),
             vtx,
-            true,
+            PeerKind::Group,
             vec![],
         )
         .await?;
         primary.pc.create_data_channel("data", None).await?;
-        let offer = primary.local_sdp(true).await?;
+        // The join payload needs our ICE credentials, fingerprint and SSRC.
+        // Keep signaling stable until we have the SFU description to answer.
+        let offer = primary.pc.create_offer(None).await?.sdp;
         Ok(Self {
             primary,
             echo: None,
@@ -702,11 +724,7 @@ impl Session {
         let (offer, response, sources) = info
             .as_mut()
             .ok_or_else(|| Error::Invalid("not a Telegram session".into()))?;
-        let answer = telegram::answer_sdp(offer, params, sources)?;
-        self.primary
-            .pc
-            .set_remote_description(RTCSessionDescription::answer(answer)?)
-            .await?;
+        self.primary.answer_sfu(offer, params, sources).await?;
         *response = params.into();
         drop(info);
         self.primary.wait_connected().await
@@ -749,13 +767,8 @@ impl Session {
                 .await?;
             sources.push(ssrc);
         }
-        *offer = self.primary.local_sdp(true).await?;
-        let answer = telegram::answer_sdp(offer, response, sources)?;
-        self.primary
-            .pc
-            .set_remote_description(RTCSessionDescription::answer(answer)?)
-            .await?;
-        Ok(())
+        *offer = self.primary.pc.create_offer(None).await?.sdp;
+        self.primary.answer_sfu(offer, response, sources).await
     }
 
     pub async fn send_pcm(&self, pcm: &[u8]) -> Result<u32> {

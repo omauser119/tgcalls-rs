@@ -4,6 +4,7 @@ import asyncio
 import json
 import secrets
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from ._native import Engine, PCM_BYTES
@@ -19,11 +20,27 @@ class AudioFrame:
     pcm: bytes
 
 
+def _complete_pcm(future, timestamp, error):
+    if not future.done():
+        if error is None:
+            future.set_result(timestamp)
+        else:
+            future.set_exception(error)
+
+
+def _notify_pcm(loop, future, timestamp, error):
+    try:
+        loop.call_soon_threadsafe(_complete_pcm, future, timestamp, error)
+    except RuntimeError:
+        if not loop.is_closed():
+            raise
+
+
 class Call:
     """One connection. A hardened worker restart changes generation and requires rejoin.
 
-    Cancellation of an asyncio call cannot cancel a native operation already running
-    in a thread; every native network wait has its own bounded timeout.
+    Cancellation of an asyncio call cannot cancel an in-flight native operation.
+    Every native network wait has its own bounded timeout.
     """
 
     def __init__(self, *, hardened: bool = False, helper_path: str | Path | None = None,
@@ -67,7 +84,16 @@ class Call:
         if not isinstance(pcm, bytes) or len(pcm) != PCM_BYTES:
             raise ValueError(f"expected {PCM_BYTES} bytes of 20 ms stereo s16le PCM")
         async with self._send_lock:
-            return await asyncio.to_thread(self._native.send_pcm, pcm)
+            if self.hardened:
+                timestamp = self._native.try_send_pcm(pcm)
+                if timestamp is not None:
+                    return timestamp
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            timestamp = self._native.submit_pcm(pcm, partial(_notify_pcm, loop, future))
+            if timestamp is not None:
+                return timestamp
+            return await future
 
     async def receive(self, timeout: float = 1) -> AudioFrame:
         self._check_open()

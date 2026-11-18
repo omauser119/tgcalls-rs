@@ -109,7 +109,25 @@ fn candidate(c: &Value) -> Result<Option<String>> {
 }
 
 pub fn answer_sdp(offer: &str, response: &str, remote_ssrcs: &[u32]) -> Result<String> {
-    validate_sdp(offer)?;
+    remote_sdp(offer, response, remote_ssrcs, false)
+}
+
+#[cfg(feature = "async")]
+pub(crate) fn sfu_offer_sdp(
+    template: &str,
+    response: &str,
+    remote_ssrcs: &[u32],
+) -> Result<String> {
+    remote_sdp(template, response, remote_ssrcs, true)
+}
+
+fn remote_sdp(
+    template: &str,
+    response: &str,
+    remote_ssrcs: &[u32],
+    sfu_offer: bool,
+) -> Result<String> {
+    validate_sdp(template)?;
     if response.len() > MAX_JSON || remote_ssrcs.len() > 64 {
         return Err(Error::Invalid("oversized Telegram signaling".into()));
     }
@@ -162,9 +180,16 @@ pub fn answer_sdp(offer: &str, response: &str, remote_ssrcs: &[u32]) -> Result<S
     if candidate_lines.is_empty() {
         return Err(Error::Invalid("no usable UDP RTP candidates".into()));
     }
-    let mut result =
-        String::from("v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=ice-lite\r\n");
-    if let Ok(bundle) = attribute(offer, "a=group:BUNDLE ") {
+    let mut result = String::from("v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n");
+    let setup = if sfu_offer {
+        // Telegram takes the controlling ICE role and initiates DTLS. The
+        // full ICE offer selects that role without relying on conflict recovery.
+        "actpass"
+    } else {
+        result.push_str("a=ice-lite\r\n");
+        "active"
+    };
+    if let Ok(bundle) = attribute(template, "a=group:BUNDLE ") {
         token(bundle, 1, 128).or_else(|_| {
             if bundle.split(' ').all(|s| token(s, 1, 16).is_ok()) {
                 Ok(bundle)
@@ -176,7 +201,7 @@ pub fn answer_sdp(offer: &str, response: &str, remote_ssrcs: &[u32]) -> Result<S
     }
     result.push_str("a=msid-semantic: WMS *\r\n");
     let mut audio_index = 0;
-    for section in offer.split("\r\nm=").skip(1) {
+    for section in template.split("\r\nm=").skip(1) {
         let mut lines = section.lines();
         let media = lines
             .next()
@@ -204,7 +229,7 @@ pub fn answer_sdp(offer: &str, response: &str, remote_ssrcs: &[u32]) -> Result<S
             }
         }
         result.push_str(&format!(
-            "a=ice-ufrag:{ufrag}\r\na=ice-pwd:{pwd}\r\na=fingerprint:{} {}\r\na=setup:active\r\n",
+            "a=ice-ufrag:{ufrag}\r\na=ice-pwd:{pwd}\r\na=fingerprint:{} {}\r\na=setup:{setup}\r\n",
             fp.hash, fp.fingerprint
         ));
         result.push_str(&candidate_lines);

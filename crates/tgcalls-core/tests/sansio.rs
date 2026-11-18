@@ -57,7 +57,7 @@ fn gathers_server_reflexive_candidate_from_matching_transaction()
     use tgcalls_core::negotiation::IceServer;
 
     let local = "192.0.2.10:59000".parse()?;
-    let server = "192.0.2.20:3478".parse()?;
+    let server: std::net::SocketAddr = "192.0.2.20:3478".parse()?;
     let now = Instant::now();
     let mut engine = Engine::with_ice(
         local,

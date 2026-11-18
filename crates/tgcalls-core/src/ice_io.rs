@@ -16,7 +16,7 @@ use rtc::{
     },
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, VecDeque, btree_map::Entry},
     net::SocketAddr,
     time::{Duration, Instant},
 };
@@ -63,9 +63,9 @@ impl IceIo {
                         "Telegram reflector requires its own transport".into(),
                     ));
                 }
-                if io.allocations.contains_key(&address) {
+                let Entry::Vacant(allocation) = io.allocations.entry(address) else {
                     continue;
-                }
+                };
                 let provider =
                     rtc::crypto::default_provider().map_err(|e| Error::Invalid(e.to_string()))?;
                 let mut client = Client::new(
@@ -81,28 +81,22 @@ impl IceIo {
                     provider,
                 )?;
                 let request = client.allocate(now)?;
-                io.allocations.insert(
-                    address,
-                    Allocation {
-                        client,
-                        request,
-                        relay: None,
-                        pending: BTreeMap::new(),
-                        finished: false,
-                    },
-                );
-            } else if !io.bindings.contains_key(&address) {
+                allocation.insert(Allocation {
+                    client,
+                    request,
+                    relay: None,
+                    pending: BTreeMap::new(),
+                    finished: false,
+                });
+            } else if let Entry::Vacant(binding) = io.bindings.entry(address) {
                 let mut request = Message::new();
                 request.build(&[Box::<TransactionId>::default(), Box::new(BINDING_REQUEST)])?;
-                io.bindings.insert(
-                    address,
-                    Binding {
-                        transaction: request.transaction_id,
-                        packet: request.raw,
-                        attempts: 0,
-                        next: now,
-                    },
-                );
+                binding.insert(Binding {
+                    transaction: request.transaction_id,
+                    packet: request.raw,
+                    attempts: 0,
+                    next: now,
+                });
             }
         }
         Ok(io)

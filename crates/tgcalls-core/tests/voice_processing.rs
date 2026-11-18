@@ -21,7 +21,13 @@ fn capture_and_render_support_device_rates_and_preserve_mono_balance()
         voice.render(&[0; 1920])?;
         let output = voice.capture(&capture, 25)?;
         assert_eq!(output.len(), 1920);
-        assert!(output.chunks_exact(4).all(|frame| frame[..2] == frame[2..]));
+        assert!(
+            output
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|frame| frame[..2] == frame[2..])
+        );
         nonzero |= output.iter().any(|value| *value != 0);
     }
     assert!(nonzero);

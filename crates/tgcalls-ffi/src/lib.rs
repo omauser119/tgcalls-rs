@@ -61,6 +61,25 @@ fn guard<T>(fallback: T, f: impl FnOnce() -> Result<T, String>) -> T {
 /// `module` must address `length` readable bytes when length is nonzero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tgcalls_client_new(mode: u32, module: *const u8, length: usize) -> u64 {
+    let limits = Limits::default();
+    // SAFETY: the readable span contract is identical for both constructors.
+    unsafe {
+        tgcalls_client_new_with_limits(mode, module, length, limits.memory_bytes, limits.fuel)
+    }
+}
+
+/// Create a client with host-selected limits for a single Wasm instance.
+///
+/// # Safety
+/// `module` must address `length` readable bytes when length is nonzero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tgcalls_client_new_with_limits(
+    mode: u32,
+    module: *const u8,
+    length: usize,
+    memory_bytes: usize,
+    fuel_per_request: u64,
+) -> u64 {
     guard(0, || {
         let client = match mode {
             0 => Client::Native(Box::default()),
@@ -72,7 +91,14 @@ pub unsafe extern "C" fn tgcalls_client_new(mode: u32, module: *const u8, length
                 // this bounded slice is used during construction.
                 let bytes = unsafe { std::slice::from_raw_parts(module, length) };
                 Client::Hardened(Box::new(
-                    WasmSandbox::new(bytes, Limits::default()).map_err(|e| e.to_string())?,
+                    WasmSandbox::new(
+                        bytes,
+                        Limits {
+                            memory_bytes,
+                            fuel: fuel_per_request,
+                        },
+                    )
+                    .map_err(|e| e.to_string())?,
                 ))
             }
             _ => return Err("unknown isolation mode".into()),

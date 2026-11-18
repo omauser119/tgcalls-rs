@@ -8,13 +8,13 @@ public actor TgCallsClient {
     public static let hardenModePreference = "CallsHardenMode"
 
     public static func configured(bundle: Bundle = .main, defaults: UserDefaults = .standard,
-                                  macosService: String? = nil) throws -> TgCallsClient {
+                                  macosService: String? = nil, limits: WasmLimits = WasmLimits()) throws -> TgCallsClient {
         let mode: Isolation = defaults.bool(forKey: hardenModePreference) ? .hardened : .standard
         #if os(iOS)
         let module = mode == .hardened
             ? try bundle.url(forResource: "tgcalls-worker", withExtension: "wasm").map { try Data(contentsOf: $0) }
             : nil
-        return try TgCallsClient(isolation: mode, wasmModule: module)
+        return try TgCallsClient(isolation: mode, wasmModule: module, limits: limits)
         #else
         return try TgCallsClient(isolation: mode, macosService: macosService)
         #endif
@@ -23,9 +23,10 @@ public actor TgCallsClient {
     #if os(macOS)
     private let xpc: XpcWorker?
     #endif
-    public init(isolation: Isolation, wasmModule: Data? = nil, macosService: String? = nil) throws {
+    public init(isolation: Isolation, wasmModule: Data? = nil, macosService: String? = nil,
+                limits: WasmLimits = WasmLimits()) throws {
         #if os(iOS)
-        local = try LocalWorker(wasmModule: wasmModule, hardened: isolation == .hardened)
+        local = try LocalWorker(wasmModule: wasmModule, hardened: isolation == .hardened, limits: limits)
         #elseif os(macOS)
         if isolation == .hardened {
             guard let name = macosService, !name.isEmpty else { throw TgCallsError.isolationUnavailable }

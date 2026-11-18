@@ -6,6 +6,8 @@
 extern "C" {
 #endif
 uint64_t tgcalls_client_new(uint32_t mode, const uint8_t *module, size_t length);
+uint64_t tgcalls_client_new_with_limits(uint32_t mode, const uint8_t *module, size_t length,
+                                       size_t memory_bytes, uint64_t fuel_per_request);
 uint64_t tgcalls_client_request(uint64_t client, const uint8_t *bytes, size_t length);
 uint64_t tgcalls_client_generation(uint64_t client);
 void tgcalls_client_free(uint64_t client);

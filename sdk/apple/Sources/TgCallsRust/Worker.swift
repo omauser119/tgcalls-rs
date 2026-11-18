@@ -3,15 +3,29 @@ import CTgCalls
 
 public enum TgCallsError: Error { case worker(String), response, isolationUnavailable }
 
+public struct WasmLimits: Sendable {
+    public let memoryBytes: Int
+    public let fuelPerRequest: UInt64
+
+    public init(memoryBytes: Int = 256 * 1024 * 1024, fuelPerRequest: UInt64 = 2_000_000_000) {
+        self.memoryBytes = memoryBytes
+        self.fuelPerRequest = fuelPerRequest
+    }
+}
+
 /// Low-level serialized worker. Network packets, PCM and I420 cross this bounded
 /// request boundary; SDP, RTP, DH and codec parsing execute inside the worker.
 public final class LocalWorker: @unchecked Sendable {
     private let lock = NSLock()
     private var handle: UInt64
-    public init(wasmModule: Data? = nil, hardened: Bool) throws {
+    public init(wasmModule: Data? = nil, hardened: Bool, limits: WasmLimits = WasmLimits()) throws {
         if hardened {
             guard let module = wasmModule, !module.isEmpty else { throw TgCallsError.isolationUnavailable }
-            handle = module.withUnsafeBytes { tgcalls_client_new(1, $0.bindMemory(to: UInt8.self).baseAddress, module.count) }
+            guard limits.memoryBytes > 0 else { throw TgCallsError.isolationUnavailable }
+            handle = module.withUnsafeBytes {
+                tgcalls_client_new_with_limits(1, $0.bindMemory(to: UInt8.self).baseAddress,
+                                               module.count, limits.memoryBytes, limits.fuelPerRequest)
+            }
         } else { handle = tgcalls_client_new(0, nil, 0) }
         guard handle != 0 else { throw TgCallsError.worker(String(cString: tgcalls_last_error())) }
     }

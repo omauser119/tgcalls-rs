@@ -44,6 +44,16 @@ jobs:
       - run: cargo build --locked --release -p tgcalls-ffi
       - run: swift test --package-path sdk/apple -Xlinker "-L$PWD/target/release"
       - run: bash scripts/build-apple.sh
+      - name: Verify and archive iOS slices
+        run: |
+          xcrun lipo -verify_arch arm64 artifacts/apple/device/libtgcalls_ffi.a
+          xcrun lipo -verify_arch arm64 x86_64 artifacts/apple/simulator/libtgcalls_ffi.a
+          cmp artifacts/tgcalls-worker.wasm artifacts/apple/TgCallsRust.xcframework/Resources/tgcalls-worker.wasm
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: TgCallsRust-iOS
+          path: artifacts/apple/TgCallsRust.xcframework
+          if-no-files-found: error
       - run: bash scripts/package-macos-worker.sh org.tgcalls.test.worker
   android:
     runs-on: ubuntu-latest

@@ -1,13 +1,20 @@
 use anyhow::{Context, Result, bail};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use wasmi::{
-    Config, Engine, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
-    TypedFunc,
+    Caller, Config, Engine, Error, Extern, Instance, Linker, Memory, Module, Store, StoreLimits,
+    StoreLimitsBuilder, TypedFunc,
 };
-use wasmi_wasi::{WasiCtx, WasiCtxBuilder};
 
 const MAX_MODULE: usize = 32 * 1024 * 1024;
 pub const MAX_REQUEST: usize = 8 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 32 * 1024 * 1024;
+const ENTROPY_BUDGET: usize = 64 * 1024;
+const WASI: &str = "wasi_snapshot_preview1";
+const BAD_FD: i32 = 8;
+const BAD_ADDRESS: i32 = 21;
+const INVALID_ARGUMENT: i32 = 28;
+const IO_ERROR: i32 = 29;
+const NOT_CAPABLE: i32 = 76;
 
 #[derive(Clone, Copy)]
 pub struct Limits {
@@ -23,8 +30,88 @@ impl Default for Limits {
     }
 }
 struct State {
-    wasi: WasiCtx,
     limits: StoreLimits,
+    epoch: Instant,
+    entropy_left: usize,
+}
+
+fn write_guest(caller: &mut Caller<'_, State>, address: i32, value: &[u8]) -> i32 {
+    let Some(memory) = caller.get_export("memory").and_then(Extern::into_memory) else {
+        return BAD_ADDRESS;
+    };
+    match memory.write(caller, address as u32 as usize, value) {
+        Ok(()) => 0,
+        Err(_) => BAD_ADDRESS,
+    }
+}
+
+fn entropy(mut caller: Caller<'_, State>, address: i32, length: i32) -> i32 {
+    let start = address as u32 as usize;
+    let length = length as u32 as usize;
+    let Some(end) = start.checked_add(length) else {
+        return BAD_ADDRESS;
+    };
+    let Some(memory) = caller.get_export("memory").and_then(Extern::into_memory) else {
+        return BAD_ADDRESS;
+    };
+    if end > memory.data_size(&caller) {
+        return BAD_ADDRESS;
+    }
+    if length > caller.data().entropy_left {
+        return NOT_CAPABLE;
+    }
+    caller.data_mut().entropy_left -= length;
+    match getrandom::fill(&mut memory.data_mut(&mut caller)[start..end]) {
+        Ok(()) => 0,
+        Err(_) => IO_ERROR,
+    }
+}
+
+fn clock(mut caller: Caller<'_, State>, id: i32, _precision: i64, address: i32) -> i32 {
+    let elapsed = match id {
+        0 => SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default(),
+        1 => caller.data().epoch.elapsed(),
+        _ => return INVALID_ARGUMENT,
+    };
+    let ns = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+    write_guest(&mut caller, address, &ns.to_le_bytes())
+}
+
+fn register_imports(linker: &mut Linker<State>) -> Result<()> {
+    linker.func_wrap(WASI, "random_get", entropy)?;
+    linker.func_wrap(WASI, "clock_time_get", clock)?;
+    linker.func_wrap(WASI, "environ_get", |_: i32, _: i32| 0)?;
+    linker.func_wrap(
+        WASI,
+        "environ_sizes_get",
+        |mut caller: Caller<'_, State>, count: i32, size: i32| {
+            let result = write_guest(&mut caller, count, &[0; 4]);
+            if result == 0 {
+                write_guest(&mut caller, size, &[0; 4])
+            } else {
+                result
+            }
+        },
+    )?;
+    linker.func_wrap(WASI, "fd_close", |_: i32| BAD_FD)?;
+    linker.func_wrap(WASI, "fd_fdstat_get", |_: i32, _: i32| BAD_FD)?;
+    linker.func_wrap(WASI, "fd_prestat_get", |_: i32, _: i32| BAD_FD)?;
+    linker.func_wrap(WASI, "fd_prestat_dir_name", |_: i32, _: i32, _: i32| BAD_FD)?;
+    linker.func_wrap(WASI, "fd_write", |_: i32, _: i32, _: i32, _: i32| BAD_FD)?;
+    linker.func_wrap(
+        WASI,
+        "path_open",
+        |_: i32, _: i32, _: i32, _: i32, _: i32, _: i64, _: i64, _: i32, _: i32| NOT_CAPABLE,
+    )?;
+    linker.func_wrap(
+        WASI,
+        "proc_exit",
+        |status: i32| -> std::result::Result<(), Error> { Err(Error::i32_exit(status)) },
+    )?;
+    linker.func_wrap(WASI, "sched_yield", || 0)?;
+    Ok(())
 }
 struct Running {
     store: Store<State>,
@@ -60,7 +147,7 @@ impl WasmSandbox {
         // Preview1 has no network imports here. The WASI context deliberately has
         // no preopened directory, inherited descriptors, arguments or environment.
         for import in module.imports() {
-            if import.module() != "wasi_snapshot_preview1"
+            if import.module() != WASI
                 || !matches!(
                     import.name(),
                     "random_get"
@@ -95,7 +182,6 @@ impl WasmSandbox {
         Ok(result)
     }
     fn restart(&mut self) -> Result<()> {
-        let wasi = WasiCtxBuilder::new().build();
         let limits = StoreLimitsBuilder::new()
             .memory_size(self.limits.memory_bytes)
             .memories(1)
@@ -104,11 +190,18 @@ impl WasmSandbox {
             .table_elements(100_000)
             .trap_on_grow_failure(true)
             .build();
-        let mut store = Store::new(&self.engine, State { wasi, limits });
+        let mut store = Store::new(
+            &self.engine,
+            State {
+                limits,
+                epoch: Instant::now(),
+                entropy_left: ENTROPY_BUDGET,
+            },
+        );
         store.limiter(|state| &mut state.limits);
         store.set_fuel(self.limits.fuel)?;
         let mut linker = Linker::new(&self.engine);
-        wasmi_wasi::add_to_linker(&mut linker, |state: &mut State| &mut state.wasi)?;
+        register_imports(&mut linker)?;
         let instance = linker.instantiate_and_start(&mut store, &self.module)?;
         if let Ok(initialize) = instance.get_typed_func::<(), ()>(&store, "_initialize") {
             initialize.call(&mut store, ())?;
@@ -137,6 +230,7 @@ impl WasmSandbox {
     }
     fn request_inner(&mut self, bytes: &[u8]) -> Result<Vec<u8>> {
         let run = self.running.as_mut().context("Wasm instance unavailable")?;
+        run.store.data_mut().entropy_left = ENTROPY_BUDGET;
         run.store.set_fuel(self.limits.fuel)?;
         let input = run.alloc.call(&mut run.store, bytes.len() as i32)?;
         if input == 0 {
